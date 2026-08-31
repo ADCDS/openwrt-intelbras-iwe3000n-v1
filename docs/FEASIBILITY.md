@@ -4,6 +4,17 @@ Written 2026-08-31, from one console session on the live unit. No code has been
 written and nothing has been built, so treat this as a scoping document that
 should be revised the moment M0/M1 evidence exists.
 
+## What changed on 2026-08-31
+
+Three of this document's assumptions were tested and two of them broke:
+
+- **A vendor image exists** and is committed
+  ([`../../iwe3000n-firmware/vendor/`](../../iwe3000n-firmware/vendor/)). Mistakes
+  are cheaper than this document assumed.
+- **The bootloader stops on ESC** and initialises Ethernet before giving its
+  prompt, so a TFTP recovery path is likely.
+- **Route C is closed** — no Intelbras GPL source exists.
+
 ## The three constraints, in order of how much they hurt
 
 ### 1. 4 MB flash — this is the binding one
@@ -56,34 +67,40 @@ been done once already in this workspace.
 
 ## Three routes
 
+Rewritten 2026-08-31 after the research pass — route C is now closed, and the
+recommendation has changed.
+
 **A. Current OpenWrt (24.x/25.x) on a new RTL8196E target.**
-Requires writing the target from scratch — no mainline support, Lexra toolchain
-work, and then the image has to fit in 3.94 MB. This is a large project with a
-plausible outcome of "kernel boots, nothing else does", which is roughly where
-the 2020-era community work stalled. *Not recommended as a starting point.*
+Still requires writing the target from scratch, still has to fit 3.94 MB, and
+mainline's `realtek` target remains rtl838x/839x switch silicon, unrelated to
+this. *Not a starting point.*
 
-**B. An old OpenWrt on a community RTL819x fork.**
-Barrier Breaker / Chaos Calmer-era trees for rtl819x exist and are the same
-generation as what stock already runs. Realistic chance of a booting, usable
-image. The catch is that you end up maintaining a 2014-vintage userland with no
-security updates — which is *what the device already has*, so it is not a
-regression, but it is not much of a prize either.
+**B. An RTL8196E community tree.** Now the recommended route, and the choice is
+between two:
 
-**C. Rebuild the vendor's own tree.**
-Stock is `realtek_4181/generic`, `DISTRIB_REVISION="b3e88c"`. If Intelbras
-published GPL sources for it, this is by far the shortest path to a *modified*
-firmware you control — the kernel, the ethernet driver, the Wi-Fi driver and the
-flash map are all known-good on this exact board.
+- **[lekswrt/rtl8196e](https://github.com/lekswrt/rtl8196e)** — OpenWrt 14.07,
+  Linux 3.10.49, the same vintage the device already runs. The **only tree with
+  both working ethernet and the `rtl8192cd` 8192E driver at 4 MB**, and it
+  documents TFTP flashing. Last commit 2019. This is the fastest path to a
+  working device.
+- **[jnilo1/rtl8196e-gateway](https://github.com/jnilo1/rtl8196e-gateway)** —
+  mainline Linux 6.18, actively developed (last commit 2026-08-22), from-source
+  Lexra toolchain, modern SPI-NOR and ethernet. But **WiFi is compiled out**
+  (`CONFIG_WLAN` unset) and it targets 16 MB flash — **whether it fits 4 MB is
+  unmeasured**, and that is the question that decides it. Getting WiFi would mean
+  forward-porting `rtl8192cd` to 6.x, which is a substantial piece of work in its
+  own right.
 
-This route got materially more searchable after a `cfg80211` warning on the live
-unit printed the vendor's build path: the tree is called **`zeus`**, the target
-directory **`linux-realtek_4181_rtl8196e`**, the toolchain
-**`target-mips-rlx4181-linux`**, and the wireless stack
-**`compat-wireless-2014-05-22`**. Those are specific enough to search for
-directly — see [`PRIOR-ART.md`](PRIOR-ART.md) §"The unsearched lead".
+The honest framing: lekswrt gets you a working repeater on an unmaintained 2014
+userland. jnilo1 gets you a modern kernel on a device with no radio. Neither is
+both.
 
-**Action: search for those strings and file a GPL request with Intelbras.** That
-should happen before route A or B is costed, because it changes the answer.
+**C. ~~Rebuild the vendor's own tree.~~ Closed.**
+Intelbras publishes no source and has no request process — checked directly, see
+[`PRIOR-ART.md`](PRIOR-ART.md). It matters less than expected: their target name
+appears nowhere public, but the SDK it was renamed from *is* public, and
+vido89's `mkcmdline` generates this device's kernel command line byte for byte.
+There is very likely nothing in the vendor tree that is not already available.
 
 ## Is this worth it
 

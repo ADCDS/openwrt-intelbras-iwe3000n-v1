@@ -28,35 +28,87 @@ a reading list for milestone M2, not a recommendation.
 - [Revive 4MB Flash(/32MB Mem) Devices with RAM overlay root](https://forum.openwrt.org/t/revive-4mb-flash-32mb-mem-devices-with-ram-overlay-root/139802)
   — the mitigation for our binding constraint.
 
-## The unsearched lead
+## The GPL question: answered, and the answer is no
 
-**Intelbras GPL sources for the IWE 3000N.** Stock is a GPL'd OpenWrt derivative,
-so a source release may exist. Nobody has looked yet. This is the single
-highest-value thing to check next — see [`FEASIBILITY.md`](FEASIBILITY.md)
-route C.
+Searched 2026-08-31. **Intelbras has no source release and no source-request
+process.** Checked directly rather than assumed:
 
-A kernel warning on the live unit printed the vendor's own build path, which
-gives unusually specific things to search for:
+- `intelbras.com/pt-br/{gpl, codigo-fonte, open-source, software-livre}` all
+  return **404**, with `/pt-br/ajuda-download` returning 200 as a control — real
+  404s, not a bot block.
+- The [IWE 3000N download page](https://www.intelbras.com/pt-br/ajuda-download/download/repetidor-de-sinal-wireless-iwe-3000n)
+  lists three items: guide, manual, firmware. No source.
+- The manual and quick-guide PDFs contain no GPL/GNU/"código fonte" text at all —
+  many vendors put the written offer there; this one does not.
+- [Intelbras forum t=36346](https://forum.intelbras.com.br/viewtopic.php?t=36346):
+  staff replies in 2014, 2016 and 2018 say only that OpenWrt "não foi homologada".
+- The [`intelbras` GitHub org](https://github.com/intelbras) has three
+  hackathon repos, untouched since 2018.
 
-```
-/home/build/zeus/build_dir/target-mips-rlx4181-linux/
-  linux-realtek_4181_rtl8196e/compat-wireless-2014-05-22/
-```
+A cold GPL demand to their support address is the only avenue, and it is
+probably not worth the wait — see below.
 
-Search terms, in rough order of how distinctive they are:
+## The vendor image, which does exist
 
-- `linux-realtek_4181_rtl8196e` — the target directory name
-- `target-mips-rlx4181-linux` — the toolchain triple
-- `compat-wireless-2014-05-22` — the backports snapshot; also tells you which
-  upstream compat-wireless tarball to fetch if only a patch set is published
-- `zeus` — the build tree name; weak on its own, useful as a confirmation
-- `realtek_4181/generic` + `b3e88c` — from `/etc/openwrt_release`
+`https://backend.intelbras.com/sites/default/files/2019-03/iwe3000n_0.8.6.zip`
+(403s a bare curl; wants a browser User-Agent and Referer). Downloaded, verified
+and committed to
+[`../../iwe3000n-firmware/vendor/`](../../iwe3000n-firmware/vendor/).
 
-Worth trying: Intelbras's own support/downloads pages, a GPL request to
-Intelbras (they are a Brazilian company and the GPL obligation applies), and
-GitHub code search for `linux-realtek_4181_rtl8196e`.
+## The build system is public even though the vendor's tree is not
 
-## In-workspace prior art
+`realtek_4181`, `linux-realtek_4181_rtl8196e` and `realtek_4181/generic` return
+**zero hits** anywhere — Intelbras's target rename is private. But the tree it was
+renamed *from* is not:
+
+- [vido89/Open-Wrt-RTK](https://github.com/vido89/Open-Wrt-RTK)'s
+  `target/linux/realtek/image/Makefile` defines
+  `mkcmdline = board=$(1) console=$(2),$(3) linuxpart=0x$(4)`, and its rtl8196e
+  profile is `SingleProfile,AP,ttyS0,38400,...,0x80500000,10000` — which
+  **generates this device's kernel command line byte for byte**. Its `target.mk`
+  says "RTL8196E (4181) based boards", which is where the `4181` naming comes
+  from. `tools/rtk-tools/src/cvimg.c`, which writes the `cs6c` header found in
+  the vendor image, is in the same tree.
+- `RSDK-4.6.4 Build 424`, the exact compiler in `/proc/version`, appears in
+  [cgoder/openwrt_rtk](https://github.com/cgoder/openwrt_rtk) and
+  [Vyacheslav-S/openwrt-rtk819](https://github.com/Vyacheslav-S/openwrt-rtk819).
+- Canonical upstream: [`rtk_openwrtSDK_v2.5.tar.gz`](https://sourceforge.net/projects/rtl819x/files/)
+  (529 MB, 2016), including `defconfig_rtl8196e`.
+- Full `rtl8192cd` C source is public — 119 files including `8192e_reg.h`, no
+  object blobs. That is the driver this board's radio needs.
+
+**Inference, clearly labelled as such:** Intelbras appears to have taken
+`rtk_openwrt_src` essentially verbatim, renamed the target, and added a
+`board=IWE3000N` profile line. If so, a GPL release would add almost nothing.
+
+## Nobody has done an Intelbras device before
+
+Zero results on GitHub, the OpenWrt wiki, the OpenWrt ToH and Brazilian forums.
+[OpenWrt forum, January 2024](https://forum.openwrt.org/t/intelbras-routers/185016):
+*"No Intelbras devices are currently supported."* This would be the first.
+
+## The candidate trees, compared
+
+Last activity and capabilities verified directly against each repo.
+
+| tree | last commit | what it is | eth | 8192E wifi | 4 MB |
+|---|---|---|---|---|---|
+| [jnilo1/rtl8196e-gateway](https://github.com/jnilo1/rtl8196e-gateway) | **2026-08-22** | mainline Linux 6.18 port | **yes** | **no** (`CONFIG_WLAN` unset) | targets 16 MB; **4 MB fit unmeasured** |
+| [lekswrt/rtl8196e](https://github.com/lekswrt/rtl8196e) | 2019-11-24 | OpenWrt 14.07 + RSDK, Linux 3.10.49 | yes (vendor) | **yes**, `rtl8192cd` incl. `8192e_reg.h` | yes; TFTP flashing documented |
+| [DawsenGao/openwrt-rtl819x](https://github.com/DawsenGao/openwrt-rtl819x) | 2018-01-31 | same lineage, cleaner history | yes | yes | branches: BB, CC, AA |
+| [vido89/Open-Wrt-RTK](https://github.com/vido89/Open-Wrt-RTK) | 2020-03-15 | 728 MB SDK dump with populated `build_dir` | yes | yes | — |
+| [shibajee/linux-rtl8196e](https://github.com/shibajee/linux-rtl8196e) | 2020-03-27 | Linux 5.4 skeleton | no | no | **`rtl8196e_totolink_n100re.dts`: 32 MB RAM, 4 MB flash, boot 0x0/0x10000, kernel 0x10000, `console=ttyS0,38400n8`** |
+| [frederic/rtl819x-toolchain](https://github.com/frederic/rtl819x-toolchain) | 2014-03-24 | SDK v3.2.3, Linux 2.6.30 | — | — | `0x400000` |
+
+`shibajee`'s TOTOLINK N100RE device tree is worth calling out separately: same
+flash size, same RAM size, same console rate and the same kernel offset as the
+IWE 3000N. It is the closest published description of this board's layout.
+
+Mainline OpenWrt remains a dead end — the official `realtek` target is
+rtl838x/839x/930x/931x switch silicon, and the RTL8196E branch stalled in April
+2021 with ethernet unfinished.
+
+## In-workspace prior art## In-workspace prior art
 
 Not third-party, and more directly useful than most of the above:
 
