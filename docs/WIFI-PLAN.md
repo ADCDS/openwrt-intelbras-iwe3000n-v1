@@ -107,6 +107,19 @@ If it does not fit, the levers are: a smaller rootfs skeleton, dropping dropbear
 building `mac80211` with fewer features, or moving the kernel/rootfs boundary
 (there is 256 KiB of slack in the kernel partition at 85 % use).
 
+## A stage-2 gotcha found while wiring the build
+
+The upstream config carries **`CONFIG_PCI_DRIVERS_LEGACY=y`**. On MIPS that
+selects the old `struct pci_controller` model; DT host-bridge drivers that use
+`devm_pci_alloc_host_bridge()` and `pci_host_probe()` — which is what stage 2
+plans to do — need **`CONFIG_PCI_DRIVERS_GENERIC`** instead. The two are a
+`choice` in `arch/mips/Kconfig`.
+
+This does not affect stage 1, which registers no bridge. It does mean stage 2
+starts with an arch-level config flip whose knock-on effects on the rest of the
+MIPS build are not yet known. Worth finding out early rather than at the point
+of registering the bridge.
+
 ## Order of work
 
 1. `CONFIG_PCI=y` and a stub `pci-rtl819x.c` that only brings up the PHY and
