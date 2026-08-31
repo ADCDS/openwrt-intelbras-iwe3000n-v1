@@ -1,0 +1,12 @@
+# Upstream tree, cloned by build.sh. Not vendored -- it is 72 MB and it is
+# somebody else's repo with its own history.
+/rtl8196e-gateway/
+
+# Build output: images ship as releases, not in-repo
+/out/
+*.img
+*.bin
+*.sqfs
+
+# Toolchain / docker scratch
+/x-tools/

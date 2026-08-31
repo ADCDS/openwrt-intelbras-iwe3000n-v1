@@ -80,9 +80,19 @@ Nothing past M1 should start before M0 and M1 are both done.
   without touching flash. Copy the DIR-842's posture: RAM-only until proven.
 - **M4 — Ethernet, then flash write.** Not before a network path exists to
   recover over.
-- **M5 — Wi-Fi.** `rtl8192cd`, reusing
-  [`../../dir842/dir842-rtl8192cd-driver/`](../../dir842/dir842-rtl8192cd-driver/)
-  where it applies.
+- **M5 — Wi-Fi.** Not a `rtl8192cd` forward-port after all. The radio is a
+  **RTL8192EE** (`10ec:818b`) and mainline has driven it since Linux 3.16 — the
+  missing piece is a **PCIe host controller** for the RTL819x, which neither
+  mainline nor jnilo1 has. The vendor register sequence is already in the
+  workspace and is the same code that printed `Find Port=0` on this board. See
+  **[`docs/WIFI-PLAN.md`](docs/WIFI-PLAN.md)**.
+
+## Read also
+
+- **[`docs/PORT-PLAN.md`](docs/PORT-PLAN.md)** — the chosen base, the 4 MB
+  arithmetic, the proposed flash layout, and what has to be built.
+- **[`docs/WIFI-PLAN.md`](docs/WIFI-PLAN.md)** — how the radio gets back, and
+  the one experiment that decides whether it can.
 
 ## What this device would actually be good for
 
