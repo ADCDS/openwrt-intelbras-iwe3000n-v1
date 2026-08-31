@@ -125,6 +125,37 @@
 	};
 };
 
+/*
+ * PCIe host, for the on-board RTL8192EE (10ec:818b).
+ *
+ * Not in rtl819x.dtsi upstream because jnilo1's tree has no PCI support at
+ * all; this goes with files/drivers/pci/controller/pci-rtl819x.c.
+ *
+ * The `soc` bus node in rtl819x.dtsi has no label, so it is re-opened through
+ * the root here rather than referenced. Its ranges are
+ * <0x00000000 0x18000000 0x04000000>, so these addresses are bus-relative:
+ * 0x00b00000 is physical 0x18b00000.
+ *
+ * Those are the vendor's KSEG1 addresses converted -- the
+ * "Find Port=0 Device:Vender ID=818b10ec" line in this board's boot log came
+ * from polling 0xb8b00728 and then reading 0xb8b10000.
+ *
+ * STAGE 1: the driver only trains the link and reads the config header. No
+ * ranges, bus-range or interrupt-map yet; see the stage 2 notes in the driver.
+ */
+/ {
+	soc {
+		pcie: pcie@b00000 {
+			compatible = "realtek,rtl819x-pcie";
+			reg = <0x00b00000 0x1000>,
+			      <0x00b10000 0x1000>,
+			      <0x00b01000 0x1000>;
+			reg-names = "rc-cfg", "dev-cfg", "phy";
+			status = "okay";
+		};
+	};
+};
+
 &ethernet {
 	status = "okay";
 	#address-cells = <1>;
