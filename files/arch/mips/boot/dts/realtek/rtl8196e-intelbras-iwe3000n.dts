@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Intelbras IWE 3000N v1 — RealTek RTL8196E Wi-Fi repeater.
+ *
+ * DRAFT. Not built, not booted. Derived from jnilo1/rtl8196e-gateway's
+ * rtl8196e.dts (Lidl Silvercrest) with the board-specific parts replaced by
+ * what was measured on the real unit; everything still unknown is marked TODO
+ * rather than guessed.
+ *
+ * Measured on hardware, safe to rely on:
+ *   - 32 MB DRAM on a 16-bit bus (loader banner "[16bit]", kernel "memory:
+ *     02000000 @ 00000000")
+ *   - console ttyS0 at 38400, from the stock kernel command line
+ *   - Winbond W25Q32, JEDEC 0xEF4016, 4 MB, and the kernel logs
+ *     "Force into Single IO Mode"
+ *   - the LAN jack is a VLAN on the SoC switch, not a lone PHY:
+ *     eth0 vid=9 member port 0x10f, eth1 vid=8 member port 0x110
+ *
+ * Not measured, deliberately absent:
+ *   - LED and button GPIOs. The stock firmware loads gpio_button_hotplug and
+ *     /etc/rc.button/{reset,wps,rfkill,power} exist, so there is at least a
+ *     reset button, but no pin has been traced. Adding a wrong gpio-leds node
+ *     is worse than having none.
+ *   - There is no EFR32 radio on this board, so the upstream radio-bridge node
+ *     is dropped rather than adapted.
+ */
+/dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
+#include "rtl819x.dtsi"
+
+/ {
+	compatible = "realtek,rtl8196e", "realtek,rtl819x-soc";
+	model = "Intelbras IWE 3000N v1";
+
+	chosen {
+		bootargs = "console=ttyS0,38400 loglevel=7 root=/dev/mtdblock2 rootfstype=squashfs";
+	};
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x02000000>;	/* 32 MB, 16-bit bus */
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/*
+		 * Kept at the upstream addresses. `boothold` is a contract with
+		 * jnilo1's replacement bootloader, which this board does NOT use --
+		 * we keep the stock RealTek loader because mtd0 also holds this
+		 * unit's MAC and RF calibration. Harmless to reserve; revisit if
+		 * the 32 MB top ever needs reclaiming.
+		 */
+		boothold: boothold@1ffe000 {
+			reg = <0x01FFE000 0x1000>;
+			no-map;
+		};
+
+		wdtcrash: watchdog-crash@1ffd000 {
+			reg = <0x01FFD000 0x1000>;
+			no-map;
+		};
+	};
+
+	/* TODO: leds { } once the status/LAN LED GPIOs are traced. */
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&spi0 {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		/*
+		 * The stock kernel reports the controller forced to single-IO and
+		 * the vendor table shows chip_clk 0x4e. 25 MHz matches upstream and
+		 * is conservative; raise only with evidence.
+		 */
+		spi-max-frequency = <25000000>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			/*
+			 * ⚠ 64 KB, read-only, and it must stay that way. Besides the
+			 * bootloader this holds the H601 factory block at 0x6000 --
+			 * two copies of the MAC (D8:77:8B:3F:E2:01) and what looks
+			 * like per-channel TX power calibration. There is no separate
+			 * MAC partition on this board and nothing can regenerate it.
+			 */
+			partition@0 {
+				label = "boot";
+				reg = <0x000000 0x010000>;
+				read-only;
+			};
+
+			/*
+			 * Everything below differs from stock, which split this region
+			 * 1028 KB kernel / 2.93 MB rootfs. A 6.18 kernel image is
+			 * 1408 KB, so the boundary has to move.
+			 */
+			partition@10000 {
+				label = "kernel";
+				reg = <0x010000 0x1A0000>;	/* 1664 KB, 85% used */
+			};
+
+			partition@1b0000 {
+				label = "rootfs";
+				reg = <0x1B0000 0x1E0000>;	/* 1920 KB */
+			};
+
+			partition@390000 {
+				label = "rootfs_data";
+				reg = <0x390000 0x070000>;	/* 448 KB, ~= stock's 440 KB */
+			};
+		};
+	};
+};
+
+&ethernet {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/*
+	 * TODO: lan-led-gpios. Upstream's Lidl board uses gpio0 14 (B6 /
+	 * LED_PORT4); untraced here.
+	 *
+	 * The stock firmware brings up eth0 on vid 9 (member port 0x10f) and
+	 * eth1 on vid 8 (member port 0x110), with peth0 mapped to eth1 and the
+	 * single jack carrying eth1. Mirror that here once the upstream
+	 * interface@N binding is understood.
+	 */
+};

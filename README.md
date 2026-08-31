@@ -70,9 +70,12 @@ Nothing past M1 should start before M0 and M1 are both done.
   port 0x110`, `peth0` mapped to `eth1`). Still open: whether the loader stops on
   a keypress and which one, the GPIO map for LEDs and the reset button, and where
   the factory MAC lives.
-- **M2 — Pick a base.** Decide between the three routes in
-  [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md) §"Three routes". This is the real
-  decision point and it should be made with M0/M1 evidence, not now.
+- **M2 — Pick a base.** ✅ **Done: [jnilo1/rtl8196e-gateway](https://github.com/jnilo1/rtl8196e-gateway)**,
+  mainline Linux 6.18. The 4 MB question that blocked this decision is answered
+  — it fits, with 85 % of a 1664 KiB kernel partition used and the overlay no
+  smaller than stock's. See **[`docs/PORT-PLAN.md`](docs/PORT-PLAN.md)**, which
+  also explains why no bootloader replacement is needed and what the route
+  costs (no Wi-Fi).
 - **M3 — RAM-boot something.** Any kernel that reaches a shell over serial
   without touching flash. Copy the DIR-842's posture: RAM-only until proven.
 - **M4 — Ethernet, then flash write.** Not before a network path exists to
