@@ -1,21 +1,27 @@
-clocksource: rtl819x: debug -- use the existing timer forensics functions
+clocksource: timer-rtl819x: debug -- issue #99 storm probe in the timer ISR
 
-Continuation of issue #99 (see docs/M5-AP.md). Discovered that
-kernel/time/timer.c already carries timer_get_running_fn()/
-timer_collect_pending_fns()/timer_wheel_stats(), built by earlier work on
-this exact bug for the watchdog panic notifier (drivers/watchdog/
-rtl819x_wdt.c) -- whose integration was since stripped out in the v1.12
-"production rewrite" per drivers/watchdog/DESIGN.md and AUDIT.md ("the
-previous...implementation maintained a one-Hz flight recorder...Reintroduce
-diagnostics only in a separate debug build, not this driver"). The functions
-themselves remain exported and declared in <linux/timer.h>.
+Temporary instrumentation, not meant to stay in the tree.
 
-timer_wheel_stats()'s own doc comment states exactly what is needed here:
-"Discriminates the two softirq-storm shapes behind issue #99: a wheel that
-never catches up to jiffies (death spiral -- large @overdue) vs a softirq
-re-raised at line rate over a caught-up wheel (@overdue ~0)." Use it plus
-timer_get_running_fn() (non-NULL only if a callback is genuinely stuck
-@@ -20,9 +20,140 @@
+The one context proven to keep executing during the AP-start wedge is the
+platform timer hardirq. This probe runs there and, once a softirq has been
+found still pending at 50 consecutive ticks (200 ms -- impossible unless
+dispatch is stuck, and free of the NO_HZ_IDLE false positive a timer-wheel-lag
+trigger has), prints one line every 400 ticks: jiffies, wheel lag, pending
+softirq mask, run_timer_softirq() call count, CP0 Cause/Status, the intc's raw
+GIMR/GISR, the intc flight recorder's entries/empty/per-line counts, the
+interrupted PC/RA and a 6-word stack peek, plus the rtlwifi ISR per-branch
+counters from <linux/rtl_pci_dbg.h>. Silent otherwise, so it cannot perturb
+the race it measures. It can also be armed by hand via /proc/rtl819x_debug_arm.
+
+This is what identified the wedge as a ~130 kHz INTA storm on intc GIMR bit 21
+taken through _rtl_pci_interrupt()'s irq_enabled==0 early return (see
+docs/M5-AP.md). Also carries /proc/rtl819x_debug_kick, a runtime switch for a
+raise_softirq() "kick" that an earlier round wrongly believed to be a fix;
+default off, kept only so the retraction stays measurable.
+
+--- a/drivers/clocksource/timer-rtl819x.c
++++ b/drivers/clocksource/timer-rtl819x.c
+@@ -20,9 +20,285 @@
  #include <linux/interrupt.h>
  #include <linux/of.h>
  #include <linux/sched_clock.h>
@@ -23,7 +29,10 @@ timer_get_running_fn() (non-NULL only if a callback is genuinely stuck
 +#include <linux/proc_fs.h>	/* debug: /proc/rtl819x_debug_arm, issue #99 */
 +#include <linux/seq_file.h>	/* debug: single_open()/seq_read(), issue #99 */
 +#include <linux/uaccess.h>	/* debug: get_user(), issue #99 */
-+#include <linux/timer.h>	/* debug: timer_wheel_stats() etc., issue #99 */
++#include <linux/timer.h>
++#include <linux/rtl819x_intc_stats.h>
++#include <linux/rtl_pci_dbg.h>	/* debug: rtlwifi ISR counters, issue #99 */
++#include <asm/mipsregs.h>	/* debug: read_c0_cause()/status(), issue #99 */
 +#include <asm/irq_regs.h>	/* debug: get_irq_regs(), issue #99 */
  
  #include "timer-of.h"
@@ -54,67 +63,178 @@ timer_get_running_fn() (non-NULL only if a callback is genuinely stuck
 + * across recent kernels. Not intended to stay in the tree once the storm is
 + * identified.
 + */
++extern void rtl819x_intc_debug_regs(u32 *gimr, u32 *gisr); /* irq-rtl819x.c, issue #99 debug */
 +bool rtl819x_debug_armed; /* not static: kernel/time/timer.c reads it too, issue #99 */
 +
 +static void rtl819x_debug_softirq_snapshot(void)
 +{
-+	static const char * const names[NR_SOFTIRQS] = {
-+		"HI", "TIMER", "NET_TX", "NET_RX", "BLOCK",
-+		"IRQ_POLL", "TASKLET", "SCHED", "HRTIMER", "RCU",
-+	};
-+	static unsigned int calls;
-+	int i;
++	/*
++	 * issue #99 storm probe. The five softlockup reports recovered from the
++	 * console ring all show the same picture: EPC parked at handle_softirqs'
++	 * own local_irq_enable() with max_restart still 10 (a FRESH invocation
++	 * every 4 ms tick, never reaching the action call), and Cause.IP3 -- the
++	 * INTC cascade line that carries both the switch core (GIMR bit 15) and
++	 * the PCIe/wifi source (GIMR bit 21) -- pending in every single sample.
++	 * Hypothesis: a level source asserts while its GIMR bit is masked, the
++	 * INTC still drives IP3, the chained handler finds mask&status == 0
++	 * (`empty`), acks nothing, and the CPU re-takes IP3 before the
++	 * interrupted softirq executes one instruction. That predicts, during
++	 * the wedge: intc entries/empty climbing by ~1e5+ per line, GISR with a
++	 * bit set that GIMR has clear, and Cause.IP3 set. This prints exactly
++	 * those, one line per 400 ticks (1.6 s), and ONLY once the timer wheel
++	 * is already >100 jiffies behind (or when armed by hand) -- silent
++	 * before the wedge, so unlike the earlier per-callback trace it cannot
++	 * itself perturb the race it is measuring.
++	 */
++	static unsigned int calls, stuck_ticks;
++	static u32 last_entries, last_empty;
++	static unsigned long last_j, overdue;
++	unsigned int nr_pending;
 +
-+	if (!rtl819x_debug_armed)
++	/*
++	 * Trigger: TIMER_SOFTIRQ (or any softirq) still pending when this tick
++	 * arrives, for 50 ticks in a row. In normal operation a pending softirq
++	 * is serviced in the same irq_exit() that raised it, so it is never
++	 * still pending at the NEXT tick; 50 consecutive ticks (200 ms) of it
++	 * means dispatch is stuck -- exactly the wedge. Unlike the timer-wheel
++	 * lag used before, this has no NO_HZ_IDLE false positive (deferrable
++	 * timers are allowed to be late; a pending-but-undispatched softirq is
++	 * not). Silent otherwise, so it cannot perturb the race it measures.
++	 */
++	calls++;
++	if (local_softirq_pending())
++		stuck_ticks++;
++	else
++		stuck_ticks = 0;
++	if (!rtl819x_debug_armed && stuck_ticks < 50) {
++		last_entries = rtl819x_intc_stats.entries;
++		last_empty = rtl819x_intc_stats.empty;
++		last_j = jiffies;
 +		return;
++	}
 +
-+	/*
-+	 * Separately from the once-per-50-ticks softirq snapshot below, sample
-+	 * the PC this timer interrupt preempted every 10 ticks (finer grain --
-+	 * want to see whether it is the SAME address every time, a genuine
-+	 * tight loop, or scattered, which would point elsewhere). Both
-+	 * intervals are far shorter than before the flooding incident because
-+	 * this now only ever runs during a deliberately armed window, not for
-+	 * the whole boot.
-+	 */
-+	/*
-+	 * pr_emerg, not pr_info: console_loglevel was found at 5 at test time
-+	 * (some earlier command in this session's history lowered it from the
-+	 * loglevel=7 bootarg default), which silently drops KERN_INFO (6)
-+	 * before it ever reaches the UART -- pr_cont continues at whatever
-+	 * level started the line. This debug output needs to survive that
-+	 * regardless of what userspace has done to console_loglevel.
-+	 */
-+	/*
-+	 * Issue #99, latest turn: kernel/time/timer.c already carries
-+	 * timer_get_running_fn()/timer_collect_pending_fns()/timer_wheel_stats()
-+	 * -- built by earlier work on this exact bug for the watchdog panic
-+	 * notifier (drivers/watchdog/rtl819x_wdt.c), whose integration was
-+	 * since stripped in the v1.12 "production rewrite" (see
-+	 * drivers/watchdog/DESIGN.md / AUDIT.md), but the functions themselves
-+	 * are still exported and declared in <linux/timer.h>. Use them
-+	 * directly instead of the ad-hoc PC/stack sampling that turned out to
-+	 * flood the console: timer_wheel_stats()'s own doc comment says
-+	 * exactly what this is for -- "discriminates the two softirq-storm
-+	 * shapes behind issue #99: a wheel that never catches up to jiffies
-+	 * (death spiral -- large @overdue) vs a softirq re-raised at line rate
-+	 * over a caught-up wheel (@overdue ~0)". One short line, not a flood.
-+	 */
-+	if (++calls % 400)
++	if (calls % 400)
 +		return;
++	timer_wheel_stats(&overdue, &nr_pending);
 +
 +	{
-+		unsigned long overdue;
-+		unsigned int nr_pending;
++		struct pt_regs *r = get_irq_regs();
 +		extern unsigned long rtl819x_debug_run_timer_softirq_calls;
++		u32 gimr, gisr, e = rtl819x_intc_stats.entries,
++		    m = rtl819x_intc_stats.empty;
 +
-+		timer_wheel_stats(&overdue, &nr_pending);
-+		pr_emerg("issue99: j=%lu pending=0x%02lx running=%pS overdue=%lu nr=%u rtscalls=%lu\n",
-+			 jiffies, local_softirq_pending(),
-+			 timer_get_running_fn(), overdue, nr_pending,
-+			 rtl819x_debug_run_timer_softirq_calls);
++		rtl819x_intc_debug_regs(&gimr, &gisr);
++		pr_emerg("issue99: j=%lu(+%lu) overdue=%lu pend=0x%02lx rtscalls=%lu cause=%08x status=%08x GIMR=%08x GISR=%08x unmasked_pend=%08x intc_entries=%u(+%u) empty=%u(+%u) c15=%u c21=%u pc=%pS ra=%pS\n",
++			 jiffies, jiffies - last_j, overdue,
++			 local_softirq_pending(),
++			 rtl819x_debug_run_timer_softirq_calls,
++			 read_c0_cause(), read_c0_status(), gimr, gisr,
++			 gisr & ~gimr, e, e - last_entries, m, m - last_empty,
++			 rtl819x_intc_stats.count[15],
++			 rtl819x_intc_stats.count[21],
++			 r ? (void *)r->cp0_epc : NULL,
++			 r ? (void *)r->regs[31] : NULL);
++		pr_emerg("issue99: pci isr=%u ne=%u sp=%u rdu=%u rok=%u fovw=%u bcn=%u rr0=%u inta=%08x or=%08x intb=%08x en=%u dis=%u\n",
++			 rtl_pci_dbg.isr_calls, rtl_pci_dbg.not_enabled,
++			 rtl_pci_dbg.spurious, rtl_pci_dbg.rdu, rtl_pci_dbg.rok,
++			 rtl_pci_dbg.rxfovw, rtl_pci_dbg.bcnint,
++			 rtl_pci_dbg.rx_remained0, rtl_pci_dbg.last_inta,
++			 rtl_pci_dbg.or_inta, rtl_pci_dbg.last_intb,
++			 rtl_pci_dbg.enable_calls, rtl_pci_dbg.disable_calls);
++		pr_emerg("issue99: pci ne-snapshot HISR=%08x HIMR=%08x HISRE=%08x HIMRE=%08x cleared=%08x\n",
++			 rtl_pci_dbg.ne_hisr, rtl_pci_dbg.ne_himr,
++			 rtl_pci_dbg.ne_hisre, rtl_pci_dbg.ne_himre,
++			 rtl_pci_dbg.ne_cleared);
++		last_entries = e;
++		last_empty = m;
++		last_j = jiffies;
++
++		if (r) {
++			unsigned long *sp = (unsigned long *)r->regs[29];
++			int j;
++
++			for (j = 0; j < 6; j++) {
++				unsigned long w;
++
++				if (get_kernel_nofault(w, &sp[j]))
++					break;
++				if (w >= 0x80001000 && w < 0x80800000)
++					pr_emerg("issue99:  sp[%d]=%pS\n", j,
++						 (void *)w);
++			}
++		}
 +	}
 +}
++
++/*
++ * issue #99 workaround (not yet root-caused): every hostapd AP start wedges
++ * this board's softirq processing solid. Extensive on-hardware measurement
++ * (see docs/M5-AP.md) proved:
++ *   - TIMER_SOFTIRQ shows permanently pending (local_softirq_pending() bit
++ *     0x02) the instant the wedge starts;
++ *   - timer_wheel_stats() shows the wheel falling behind jiffies without
++ *     bound for as long as the wedge lasts (a "death spiral", never
++ *     recovering on its own);
++ *   - a call counter dropped into run_timer_softirq() itself proves that
++ *     function -- TIMER_SOFTIRQ's own handler -- is never invoked again once
++ *     the wedge starts, though handle_softirqs() keeps being entered
++ *     normally from ordinary hardirq exits (confirmed via PC/stack sampling:
++ *     every sample lands at handle_softirqs's own local_irq_enable(), called
++ *     from a completely ordinary hardirq-exit chain);
++ *   - every specific timer_list callback that could plausibly be the cause
++ *     was ruled out by inspection or by directly tracing every callback
++ *     invocation, which shows them all running and returning cleanly right
++ *     up to the same instant, then never again.
++ *
++ * None of that pins down *why* handle_softirqs() stops dispatching
++ * TIMER_SOFTIRQ specifically -- that would need a real in-circuit debugger,
++ * not printk sampling.
++ *
++ * DO NOT TREAT THIS FUNCTION AS A FIX. An earlier round of A/B testing was
++ * read as "calling raise_softirq() every tick makes the wedge stop happening",
++ * and this comment used to say so. That conclusion was wrong: every one of
++ * those apparently-clean runs also had the debug instrumentation armed, and
++ * arming is what turns on DEBUG-timer-callback-trace's printk around every
++ * call_timer_fn(). On this board's 38400-baud polled console each of those
++ * lines costs ~13-16ms of blocking serial I/O, so arming injects a large,
++ * unintended delay into the softirq path. Once the kick was split out and made
++ * independent of arming, the two variables came apart:
++ *
++ *   kick on,  prints on   -> 3 runs, no wedge (57s, 57s, 140s)
++ *   kick on,  prints off  -> 2 runs, wedged both times (~21s, 21-45s)
++ *
++ * i.e. the kick alone does not prevent the wedge; the console delay correlates
++ * with it far better than the raised vector does. The wedge has also now been
++ * seen to vary in onset time between otherwise identical runs, so it is at
++ * least partly timing-dependent -- which is exactly the shape of bug that a
++ * few tens of milliseconds of accidental delay would mask. Treat any
++ * single-run A/B result on this bug as noise.
++ *
++ * The function is kept only so the toggle below can keep measuring it. It is
++ * not a workaround worth shipping, and the root cause -- why handle_softirqs()
++ * stops dispatching TIMER_SOFTIRQ at all -- is still open.
++ */
++static void rtl819x_timer_softirq_kick(void)
++{
++	raise_softirq(HRTIMER_SOFTIRQ);
++}
++
++/*
++ * issue #99, isolation experiment: a validation run with the kick above
++ * unconditional but debug disarmed (no periodic snapshot, no per-callback
++ * trace print) froze at ~21s into hostapd -- the same signature as before
++ * this workaround existed. Three prior runs with debug armed (which, before
++ * the kick was split out, also implied the kick; now the kick is independent
++ * of arming) all ran 60-140s+ with no freeze. That is confounded: "armed"
++ * also means DEBUG-timer-callback-trace.patch prints ~13-16ms of blocking
++ * serial I/O around every call_timer_fn() invocation, system-wide -- real
++ * delay injected into the softirq path, not just a raised vector. This knob
++ * lets the kick itself be switched off at runtime (independent of
++ * rtl819x_debug_armed) so the two candidate explanations -- the kick vs. the
++ * print/delay -- can be told apart without a rebuild. Defaults to on (matches
++ * the behavior already validated); not meant to stay once this is resolved.
++ */
++bool rtl819x_debug_kick; /* default OFF: not a fix, see above */
 +
 +static ssize_t rtl819x_debug_arm_write(struct file *f, const char __user *buf,
 +				       size_t count, loff_t *ppos)
@@ -146,9 +266,40 @@ timer_get_running_fn() (non-NULL only if a callback is genuinely stuck
 +	.proc_release	= single_release,
 +};
 +
++static ssize_t rtl819x_debug_kick_write(struct file *f, const char __user *buf,
++					size_t count, loff_t *ppos)
++{
++	char c;
++
++	if (count < 1 || get_user(c, buf))
++		return -EFAULT;
++	rtl819x_debug_kick = (c == '1');
++	return count;
++}
++
++static int rtl819x_debug_kick_show(struct seq_file *m, void *v)
++{
++	seq_printf(m, "%d\n", rtl819x_debug_kick);
++	return 0;
++}
++
++static int rtl819x_debug_kick_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, rtl819x_debug_kick_show, NULL);
++}
++
++static const struct proc_ops rtl819x_debug_kick_fops = {
++	.proc_open	= rtl819x_debug_kick_open,
++	.proc_read	= seq_read,
++	.proc_write	= rtl819x_debug_kick_write,
++	.proc_lseek	= seq_lseek,
++	.proc_release	= single_release,
++};
++
 +static int __init rtl819x_debug_arm_proc_init(void)
 +{
 +	proc_create("rtl819x_debug_arm", 0644, NULL, &rtl819x_debug_arm_fops);
++	proc_create("rtl819x_debug_kick", 0644, NULL, &rtl819x_debug_kick_fops);
 +	return 0;
 +}
 +late_initcall(rtl819x_debug_arm_proc_init);
@@ -156,11 +307,13 @@ timer_get_running_fn() (non-NULL only if a callback is genuinely stuck
  #define DRV_VERSION "1.3"
  
  #define REALTEK_TC_REG_DATA0		0x00
-@@ -276,6 +407,7 @@
+@@ -276,6 +552,9 @@ static irqreturn_t rtl819x_timer_interrupt(int irq, void *dev_id)
  		ir |= REALTEK_TC_IR_TC0_PENDING;
  		tc_w32(ir, REALTEK_TC_REG_IR);
  	}
 +	rtl819x_debug_softirq_snapshot();
++	if (rtl819x_debug_kick)
++		rtl819x_timer_softirq_kick();
  	if (likely(ced && ced->event_handler))
  		ced->event_handler(ced);
  	return IRQ_HANDLED;

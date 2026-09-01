@@ -17,10 +17,10 @@ registered from a late_initcall (intc_of_init runs during arch_init_irq(),
 before procfs exists, so it cannot host this itself).
 
 Not intended to stay in the tree once the storm is identified.
-
---- a/drivers/irqchip/irq-rtl819x.c
-+++ b/drivers/irqchip/irq-rtl819x.c
-@@ -467,3 +467,50 @@
+diff -Naur base/drivers/irqchip/irq-rtl819x.c cur/drivers/irqchip/irq-rtl819x.c
+--- a/drivers/irqchip/irq-rtl819x.c	2026-09-01 16:35:13.040776120 -0300
++++ b/drivers/irqchip/irq-rtl819x.c	2026-09-01 16:35:13.040776120 -0300
+@@ -467,3 +467,61 @@
  
  /* Register with kernel irqchip infrastructure */
  IRQCHIP_DECLARE(rtl819x_intc, "realtek,rtl819x-intc", intc_of_init);
@@ -44,6 +44,17 @@ Not intended to stay in the tree once the storm is identified.
 + */
 +#include <linux/proc_fs.h>
 +#include <linux/seq_file.h>
++
++/*
++ * issue #99 debug: raw GIMR/GISR for the timer-ISR storm probe in
++ * drivers/clocksource/timer-rtl819x.c. Two MMIO reads, hardirq-safe, no lock
++ * (read-only snapshot; a torn pair is fine for a diagnostic line).
++ */
++void rtl819x_intc_debug_regs(u32 *gimr, u32 *gisr)
++{
++	*gimr = ic_r32(REALTEK_IC_REG_MASK);
++	*gisr = ic_r32(REALTEK_IC_REG_STATUS);
++}
 +
 +static int rtl819x_intc_stats_show(struct seq_file *m, void *v)
 +{

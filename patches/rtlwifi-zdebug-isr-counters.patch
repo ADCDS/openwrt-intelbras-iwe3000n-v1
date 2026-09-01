@@ -1,0 +1,125 @@
+rtlwifi: debug -- per-branch ISR counters for the issue #99 INTA storm
+
+Temporary instrumentation. The RTL8192EE's INTA storms at ~130 kHz when an
+AP interface starts (INTC GIMR bit 21: 5.3M dispatches, +131k/s, none
+empty), starving every softirq until the softlockup detector panics. These
+counters name which _rtl_pci_interrupt() branch each storm iteration takes
+(early return on irq_enabled==0, spurious inta==0, RDU, ROK, ...) and what
+HISR/HISRE bits the device reports, without any console I/O in the ISR.
+They are read out by the rtl819x timer-ISR probe. Not meant to stay.
+
+Named rtlwifi-zdebug-* so it applies after rtlwifi-rx-refill-before-hw-release
+(same file, earlier hunks); generated against that patched tree.
+
+diff -Naur a/drivers/net/wireless/realtek/rtlwifi/pci.c b/drivers/net/wireless/realtek/rtlwifi/pci.c
+--- a/drivers/net/wireless/realtek/rtlwifi/pci.c	2026-09-01 16:20:54.534745226 -0300
++++ b/drivers/net/wireless/realtek/rtlwifi/pci.c	2026-09-01 16:20:54.550745782 -0300
+@@ -7,6 +7,10 @@
+ #include "base.h"
+ #include "ps.h"
+ #include "efuse.h"
++#include <linux/rtl_pci_dbg.h>
++
++/* issue #99 debug: ISR counters read by the rtl819x timer-ISR storm probe */
++struct rtl_pci_dbg_counters rtl_pci_dbg;
+ #include <linux/interrupt.h>
+ #include <linux/export.h>
+ #include <linux/module.h>
+@@ -679,8 +683,10 @@
+ 				rx_remained_cnt =
+ 				rtlpriv->cfg->ops->rx_desc_buff_remained_cnt(hw,
+ 								      hw_queue);
+-			if (rx_remained_cnt == 0)
++			if (rx_remained_cnt == 0) {
++				rtl_pci_dbg.rx_remained0++;
+ 				return;
++			}
+ 			buffer_desc = &rtlpci->rx_ring[rxring_idx].buffer_desc[
+ 				rtlpci->rx_ring[rxring_idx].idx];
+ 			pdesc = (struct rtl_rx_desc *)skb->data;
+@@ -849,18 +855,27 @@
+ 
+ 	irqreturn_t ret = IRQ_HANDLED;
+ 
+-	if (rtlpci->irq_enabled == 0)
++	rtl_pci_dbg.isr_calls++;
++	if (rtlpci->irq_enabled == 0) {
++		rtl_pci_dbg.not_enabled++;
+ 		return ret;
++	}
+ 
+ 	spin_lock_irqsave(&rtlpriv->locks.irq_th_lock, flags);
+ 	rtlpriv->cfg->ops->disable_interrupt(hw);
+ 
+ 	/*read ISR: 4/8bytes */
+ 	rtlpriv->cfg->ops->interrupt_recognized(hw, &intvec);
++	rtl_pci_dbg.last_inta = intvec.inta;
++	rtl_pci_dbg.last_intb = intvec.intb;
++	rtl_pci_dbg.or_inta |= intvec.inta;
++	rtl_pci_dbg.or_intb |= intvec.intb;
+ 
+ 	/*Shared IRQ or HW disappeared */
+-	if (!intvec.inta || intvec.inta == 0xffff)
++	if (!intvec.inta || intvec.inta == 0xffff) {
++		rtl_pci_dbg.spurious++;
+ 		goto done;
++	}
+ 
+ 	/*<1> beacon related */
+ 	if (intvec.inta & rtlpriv->cfg->maps[RTL_IMR_TBDOK])
+@@ -875,6 +890,7 @@
+ 		rtl_dbg(rtlpriv, COMP_INTR, DBG_TRACE, "beacon interrupt!\n");
+ 
+ 	if (intvec.inta & rtlpriv->cfg->maps[RTL_IMR_BCNINT]) {
++		rtl_pci_dbg.bcnint++;
+ 		rtl_dbg(rtlpriv, COMP_INTR, DBG_TRACE,
+ 			"prepare beacon for interrupt!\n");
+ 		tasklet_schedule(&rtlpriv->works.irq_prepare_bcn_tasklet);
+@@ -950,17 +966,20 @@
+ 
+ 	/*<3> Rx related */
+ 	if (intvec.inta & rtlpriv->cfg->maps[RTL_IMR_ROK]) {
++		rtl_pci_dbg.rok++;
+ 		rtl_dbg(rtlpriv, COMP_INTR, DBG_TRACE, "Rx ok interrupt!\n");
+ 		_rtl_pci_rx_interrupt(hw);
+ 	}
+ 
+ 	if (unlikely(intvec.inta & rtlpriv->cfg->maps[RTL_IMR_RDU])) {
++		rtl_pci_dbg.rdu++;
+ 		rtl_dbg(rtlpriv, COMP_ERR, DBG_WARNING,
+ 			"rx descriptor unavailable!\n");
+ 		_rtl_pci_rx_interrupt(hw);
+ 	}
+ 
+ 	if (unlikely(intvec.intb & rtlpriv->cfg->maps[RTL_IMR_RXFOVW])) {
++		rtl_pci_dbg.rxfovw++;
+ 		rtl_dbg(rtlpriv, COMP_ERR, DBG_WARNING, "rx overflow !\n");
+ 		_rtl_pci_rx_interrupt(hw);
+ 	}
+diff -Naur a/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/hw.c b/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/hw.c
+--- a/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/hw.c	2026-09-01 16:20:54.538745364 -0300
++++ b/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/hw.c	2026-09-01 16:20:54.550745782 -0300
+@@ -8,6 +8,7 @@
+ #include "../cam.h"
+ #include "../ps.h"
+ #include "../pci.h"
++#include <linux/rtl_pci_dbg.h>
+ #include "reg.h"
+ #include "def.h"
+ #include "phy.h"
+@@ -1586,6 +1587,7 @@
+ 	struct rtl_priv *rtlpriv = rtl_priv(hw);
+ 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+ 
++	rtl_pci_dbg.enable_calls++;
+ 	rtl_write_dword(rtlpriv, REG_HIMR, rtlpci->irq_mask[0] & 0xFFFFFFFF);
+ 	rtl_write_dword(rtlpriv, REG_HIMRE, rtlpci->irq_mask[1] & 0xFFFFFFFF);
+ 	rtlpci->irq_enabled = true;
+@@ -1596,6 +1598,7 @@
+ 	struct rtl_priv *rtlpriv = rtl_priv(hw);
+ 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+ 
++	rtl_pci_dbg.disable_calls++;
+ 	rtl_write_dword(rtlpriv, REG_HIMR, IMR_DISABLED);
+ 	rtl_write_dword(rtlpriv, REG_HIMRE, IMR_DISABLED);
+ 	rtlpci->irq_enabled = false;

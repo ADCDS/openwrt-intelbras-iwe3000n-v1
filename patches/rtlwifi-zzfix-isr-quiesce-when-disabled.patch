@@ -1,0 +1,70 @@
+rtlwifi: quiesce the chip when the ISR runs while driver-disabled (issue #99)
+
+_rtl_pci_interrupt() returns IRQ_HANDLED immediately when rtlpci->irq_enabled
+is 0, without touching the chip. With a level-triggered INTA behind the
+RTL8196E's cascaded interrupt controller that is fatal: disable_interrupt()
+zeroes HIMR from process context, but the RTL8192EE keeps INTA asserted for a
+HISR bit already set at that moment, the intc acks its own latch and unmasks,
+the line is still high, and the CPU re-takes it before the interrupted
+context executes one instruction. Measured on hardware with per-branch ISR
+counters: 6,582,638 ISR entries during one AP start, 6,582,535 of them through
+this early return, ~130 kHz, HISR=ROK, enable/disable calls balanced (the last
+was a disable). Every softirq starves, the timer wheel stops, and the
+softlockup detector panics ~20 s later -- the "hostapd AP start freezes the
+board" bug.
+
+Read and write-1-clear HISR/HISRE in that path (dispatching nothing), so the
+line drops and the process context can finish and re-enable. Guarded by
+driver_is_goingto_unload for teardown. The raw register offsets are 8192ee's;
+a hal op would be the upstream shape. Also records a snapshot of the chip on
+the first such entries for the write-up. Applies after
+rtlwifi-zdebug-isr-counters (shares its counters).
+
+diff -Naur a/drivers/net/wireless/realtek/rtlwifi/pci.c b/drivers/net/wireless/realtek/rtlwifi/pci.c
+--- a/drivers/net/wireless/realtek/rtlwifi/pci.c	2026-09-01 16:31:37.781227528 -0300
++++ b/drivers/net/wireless/realtek/rtlwifi/pci.c	2026-09-01 16:31:37.793227948 -0300
+@@ -858,6 +858,44 @@
+ 	rtl_pci_dbg.isr_calls++;
+ 	if (rtlpci->irq_enabled == 0) {
+ 		rtl_pci_dbg.not_enabled++;
++		/*
++		 * Our own level-triggered INTA, with the driver side disabled:
++		 * disable_interrupt() zeroes HIMR/HIMRE and clears irq_enabled
++		 * from process context (hw reconfiguration paths do this around
++		 * their work). On the RTL8196E + RTL8192EE the chip keeps INTA
++		 * asserted for a HISR bit that was already set when HIMR was
++		 * zeroed, so returning here without touching it leaves the line
++		 * high: the cascade re-delivers it on the very next instruction,
++		 * forever -- measured as 6.5M entries through this branch at
++		 * ~130 kHz, every softirq starved, the process context that would
++		 * call enable_interrupt() never running again, softlockup panic
++		 * ~20 s later. Quiesce the source instead: read and write-1-clear
++		 * the status registers, dispatching nothing (the driver asked not
++		 * to be told; it rescans the rings on its next real interrupt once
++		 * it re-enables). Skipped once teardown has begun and the chip may
++		 * already be powered down.
++		 */
++		if (!rtlpci->driver_is_goingto_unload) {
++			/* 8192ee: HIMR 0xB0, HISR 0xB4, HIMRE 0xB8, HISRE 0xBC */
++			u32 hisr = rtl_read_dword(rtlpriv, 0x00B4);
++			u32 hisre = rtl_read_dword(rtlpriv, 0x00BC);
++
++			if (rtl_pci_dbg.not_enabled <= 2) {
++				rtl_pci_dbg.ne_hisr = hisr;
++				rtl_pci_dbg.ne_hisre = hisre;
++				rtl_pci_dbg.ne_himr = rtl_read_dword(rtlpriv, 0x00B0);
++				rtl_pci_dbg.ne_himre = rtl_read_dword(rtlpriv, 0x00B8);
++			}
++			/* the hal op clears the bits the driver normally handles */
++			rtlpriv->cfg->ops->interrupt_recognized(hw, &intvec);
++			/* ...and drop anything outside irq_mask too, so the line
++			 * cannot stay up on a bit the driver never dispatches */
++			if (hisr & ~intvec.inta)
++				rtl_write_dword(rtlpriv, 0x00B4, hisr & ~intvec.inta);
++			if (hisre & ~intvec.intb)
++				rtl_write_dword(rtlpriv, 0x00BC, hisre & ~intvec.intb);
++			rtl_pci_dbg.ne_cleared |= hisr;
++		}
+ 		return ret;
+ 	}
+ 

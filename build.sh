@@ -48,6 +48,9 @@ cmd_overlay() {
                    "$f/arch/mips/boot/dts/realtek/$DTS.dts"
     install -Dm644 "$HERE/files/drivers/pci/controller/pci-rtl819x.c" \
                    "$f/drivers/pci/controller/pci-rtl819x.c"
+    # issue #99 debug: counters shared by rtlwifi's ISR and the timer-ISR probe
+    install -Dm644 "$HERE/files/include/linux/rtl_pci_dbg.h" \
+                   "$f/include/linux/rtl_pci_dbg.h"
 
     # Upstream's dts Makefile lists the four steps for adding a board; 1 is the
     # copy above, 2-4 are below. Each is idempotent so re-running is safe.
@@ -109,6 +112,16 @@ PY
     echo "==> rtlwifi RX refill-before-release race fix"
     install -Dm644 "$HERE/patches/rtlwifi-rx-refill-before-hw-release.patch" \
                    "$KDIR/patches-6.18/rtlwifi-rx-refill-before-hw-release.patch"
+
+    echo "==> [DEBUG] rtlwifi ISR per-branch counters -- issue #99 INTA storm"
+    # rtlwifi-zdebug-* so it sorts after the refill patch above (same file).
+    install -Dm644 "$HERE/patches/rtlwifi-zdebug-isr-counters.patch" \
+                   "$KDIR/patches-6.18/rtlwifi-zdebug-isr-counters.patch"
+
+    echo "==> rtlwifi: quiesce INTA when the ISR runs driver-disabled -- issue #99 FIX"
+    # rtlwifi-zzfix-* so it sorts after the zdebug counters it shares.
+    install -Dm644 "$HERE/patches/rtlwifi-zzfix-isr-quiesce-when-disabled.patch" \
+                   "$KDIR/patches-6.18/rtlwifi-zzfix-isr-quiesce-when-disabled.patch"
 
     echo "==> mac80211 RX tasklet budget (softirq livelock fix)"
     install -Dm644 "$HERE/patches/mac80211-bound-rx-tasklet.patch" \

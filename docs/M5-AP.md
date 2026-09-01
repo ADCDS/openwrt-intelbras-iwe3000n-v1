@@ -448,37 +448,247 @@ from the bug being hunted; keep any future revival of this probe terse),
 (ruled out mac80211's own RX tasklet — never scheduled during the freeze,
 so not the cause either).
 
+## Update: the "softirq kick fix" was an instrumentation artifact (retracted)
+
+A `raise_softirq(HRTIMER_SOFTIRQ)` called unconditionally from the timer ISR
+was briefly believed to fix the wedge, on the strength of an A/B run where
+removing it reproduced the freeze immediately and two clean 60s runs where it
+was present. **That conclusion was wrong, and the reasoning behind it is worth
+recording so the same trap isn't walked into again.**
+
+The kick was originally written *inside* the debug snapshot function, behind
+the same `/proc/rtl819x_debug_arm` gate as the instrumentation. So every run
+that "proved" it worked also had the debug trace armed — and arming turns on
+`DEBUG-timer-callback-trace`, which printks around **every** `call_timer_fn()`
+invocation, system-wide. On this board's 38400-baud polled console each such
+line costs ~13-16ms of blocking serial I/O (visible directly in the trace's own
+timestamps: `604.323440` → `604.339920` across a single `tcp_orphan_update`
+call). Arming therefore injects tens of milliseconds of delay into the softirq
+path, once per timer callback. The kick and the delay were never separated.
+
+Splitting them apart — the kick moved to its own function, made unconditional,
+and later put behind its own runtime toggle `/proc/rtl819x_debug_kick` so both
+variables can be set independently without a rebuild — gives:
+
+| kick | debug prints | runs | result |
+|------|--------------|------|--------|
+| on   | on           | 3    | no wedge (57s, 57s, 140s) |
+| on   | off          | 2    | **wedged** (~21s; 21-45s) |
+
+The kick alone does not prevent the wedge. Whatever protection was observed
+tracks the console delay, not the raised vector.
+
+Two further cautions from these runs:
+
+- **The wedge is timing-dependent, not deterministic.** Two runs in the same
+  configuration (kick on, prints off) wedged at visibly different points —
+  ~21s in one, somewhere between 21s and 45s in the other. Any conclusion on
+  this bug drawn from a single run is noise; it needs repeated trials from
+  identical cold boots.
+- **Watch the harness, not just the board.** Two separate false results came
+  from the test rig itself, not the kernel: a login-detection heuristic that
+  rejected a perfectly good shell because getty's own audit line
+  (`login[40]: root login on 'ttyS0'`) still contained the substring `login`
+  in the tail window, and a multi-command toggle line that silently never
+  landed — which quietly turned a "prints on, kick off" run into a
+  "prints off, kick on" run without any error. Verify the knob actually took
+  effect on the board before trusting what a run says. When armed, the trace
+  flood also buries any verification echo within about a second, so read back
+  quiet-console state *before* arming.
+
+None of this changes the diagnosis in the section above (`TIMER_SOFTIRQ` goes
+pending and `run_timer_softirq()` is never entered again); it only removes a
+false fix. The root cause is still open.
+
+## Update: what the softlockup reports actually say (register-level)
+
+The console bridge keeps a 2 MiB ring; every freeze's full softlockup report
+was in it all along — the tests had only ever looked at the last ~200 bytes,
+which is loader banner. Five complete reports were recovered (`BUG: soft
+lockup - CPU#0 stuck for 22s! [hostapd:45]`, also `[hostapd:42]`,
+`[hostapd:43]`, `[hostapd:45]`, and one `[ip:39]` — so `ip link set wlan0 up`
+can trigger it too, not only hostapd). Resolved against `System.map` and the
+disassembly of `handle_softirqs()` (toolchain `objdump` from the builder
+image), the saved registers are identical in all five and map cleanly onto the
+source:
+
+| register | value | meaning |
+|---|---|---|
+| `epc` | `arch_local_irq_enable+0x14` | inside the IRQ-enable hazard slot |
+| `ra` | `handle_softirqs+0x9c` | the `local_irq_enable()` right after `restart:` |
+| `$29` (sp) | `8080df68` | the IRQ stack → `irq_exit → do_softirq_own_stack` |
+| `$17` (s1) | `806936a8` = `softirq_vec` | `h` just reset |
+| `$18` (s2) | `0xa` | `max_restart` — still 10: **the restart loop was never taken** |
+| `$19` (s3) | `0x2` (no kick) / `0x100` (kick on) | local `pending`: `TIMER_SOFTIRQ` / `HRTIMER_SOFTIRQ` |
+| `Cause` | `0x8800` (4 of 5) / `0x0800` | **IP3 pending in every sample**; IP7 (timer) in four |
+| `Status` | `0x10009c04` | IM7/IM4/IM3/IM2 enabled; `IEp` set (IRQs were on) |
+
+So every 4 ms tick over a 22 s lockup found a **fresh** `handle_softirqs()`
+frame that had just enabled interrupts and had not yet reached
+`h->action()`. `pending` is whatever was raised last — the kick merely
+changed which bit sat there — and none of it is ever dispatched. IP3 is the
+INTC cascade line; per `drivers/irqchip/irq-rtl819x.c` it carries the switch
+core (GIMR bit 15) **and, via IRR2, the PCIe/wifi source (GIMR bit 21)**.
+`/proc/interrupts` shows both lines at 0 dispatches right up to the freeze,
+and the INTC flight recorder reads `empty 0` at idle.
+
+The `CONFIG_SOFTLOCKUP_DETECTOR_INTR_STORM` section of each report reads
+`0% system, 100% softirq, 0% hardirq, 0% idle` for every 4 s window and prints
+no IRQ table. With `sched_clock` at 25 MHz, irqtime accounting is active, so
+that 0% hardirq is a real measurement: whatever burns the CPU is **not** time
+spent inside `irq_enter()..irq_exit()`. It is charged to the interrupted
+softirq context — i.e. to a frame that never executes an instruction.
+
+Working hypothesis being measured (a timer-ISR probe that auto-triggers once
+the timer wheel is >100 jiffies behind, so it is silent until the wedge and
+cannot perturb it — see the earlier retraction for why that matters): a
+level source on IP3 asserted while its GIMR bit is masked, the CPU re-taking
+IP3 the instant IE goes high, each iteration too short or too early in the
+exception path to be accounted, so the interrupted softirq frame never
+advances. The probe prints INTC `entries`/`empty` deltas, raw `GIMR`/`GISR`,
+`Cause`/`Status`, `pending` and the `run_timer_softirq()` call count every
+1.6 s during the wedge.
+
+## Update: root cause — the RTL8192EE's INTA storms at ~130 kHz on AP start
+
+Measured directly, from a timer-ISR probe that stays silent until the wedge
+(it first tripped on a false positive — timer-wheel lag from deferrable timers
+during `NO_HZ_IDLE` — so it printed through hostapd start; the wedge happened
+anyway, which is itself the strongest evidence yet that console output does
+not "fix" anything). One line every 1.6 s during the wedge, all identical in
+shape:
+
+```
+issue99: overdue=10967 pend=0x02 rtscalls=525 cause=00000800 status=10001c00
+         GIMR=00209100 GISR=08200004 unmasked_pend=08000004
+         intc_entries=5282153(+131304) empty=0(+0) c15=0 c21=5281968
+         pc=arch_local_irq_enable+0x14 ra=handle_softirqs+0x9c
+  sp[1]=realtek_soc_irq_handler+0x250  sp[5]=handle_percpu_irq+0x44
+```
+
+- **`c21` = 5.28 million and climbing by ~131,000 per second**: GIMR bit 21
+  — the PCIe/wifi INTA — is being dispatched through the INTC chained
+  handler at ~130 kHz. `empty=0`: every entry found bit 21 pending and
+  handled it. GIMR bit 21 is enabled, GISR bit 21 is set on every sample.
+- `cause=0x0800`: IP3 (the cascade line) asserted at every tick, as the five
+  softlockup register dumps already showed. `c15=0`: not the switch.
+- `rtscalls` frozen, `pend=0x02`, `overdue` growing at the jiffies rate:
+  the interrupted `handle_softirqs()` frame never executes an instruction
+  because IP3 is re-taken the moment IE goes high. That is the entire
+  "softirq dispatch stops" symptom.
+- Idle baseline for comparison: `entries 55 → 82` over 5 s, all UART, `empty 0`.
+
+Each storm iteration is ~7.6 µs: INTC dispatch → `handle_level_irq` (mask,
+ack, `_rtl_pci_interrupt()`, unmask) → return → the device still holds INTA
+→ immediate re-entry. The ISR is running; it is returning without the device
+dropping its line.
+
+Why the box did not reset this time: the probe's own `pr_emerg` from the
+timer hardirq goes through `serial8250_console_write()`, which calls
+`touch_nmi_watchdog()` — every print pets the softlockup detector, so the
+`softlockup: hung tasks` panic (which is what produced every earlier
+"Watchdog Timeout" reboot ~25 s in; the loader labels a panic-reboot that
+way) never fires, and the rtl819x hardware watchdog window is far longer.
+The board sat wedged until power-cycled. Same mechanism explains the
+softlockup reports' `100% softirq / 0% hardirq`: irqtime accounting is on
+(25 MHz `sched_clock`), and the storm's per-iteration hardirq time is
+being attributed in a way that still needs explaining — noted, not resolved.
+
+Two branches of `_rtl_pci_interrupt()` (rtlwifi `pci.c`) can return with
+INTA still asserted:
+
+1. `if (rtlpci->irq_enabled == 0) return IRQ_HANDLED;` — and
+   `rtl92ee_enable_interrupt()` writes `HIMR`/`HIMRE` *first* and sets
+   `irq_enabled = true` *after*. If the device asserts INTA between those
+   stores (this in-order core stalls on the posted MMIO write long enough for
+   the level line to be latched), the ISR returns untouched-device, the line
+   stays high, and the process context that would set the flag never runs
+   again. A one-instruction window that a slow UP MIPS with a level-triggered
+   cascade hits reliably; a fast SMP x86 never does.
+2. `IMR_RDU` ("RX descriptor unavailable") with
+   `rx_desc_buff_remained_cnt() == 0`: the ISR W1C-clears HISR and returns,
+   but the hardware still has no descriptor, so RDU re-asserts instantly.
+
+A per-branch counter patch (`rtlwifi-zdebug-isr-counters.patch`, read out by
+the probe) is the next measurement; it names the branch and the HISR bits.
+
+## Update: the storming branch, named — and the fix
+
+Per-branch counters in `_rtl_pci_interrupt()` (`rtlwifi-zdebug-isr-counters.patch`),
+read out by the probe during the wedge:
+
+```
+issue99: pci isr=6582638 ne=6582535 sp=0 rdu=0 rok=103 fovw=0 bcn=0 rr0=103
+             inta=00000001 or=00000001 intb=00000000 en=105 dis=105
+```
+
+6,582,638 ISR entries; **6,582,535 of them took the `if (rtlpci->irq_enabled
+== 0) return IRQ_HANDLED;` early return** — the ISR returning without touching
+the chip. Only 103 were real (`rok=103`, all `ROK`, and every one of them found
+nothing in the ring: `rr0=103` — a separate RX-path problem, noted below).
+`en == dis == 105`: the driver's last interrupt-mask call before the storm was
+`disable_interrupt()` (HIMR/HIMRE ← 0, `irq_enabled ← false`), issued from
+process context by one of the reconfiguration paths around AP start. Not
+`RDU` (`rdu=0`), not spurious (`sp=0`), not the enable-side ordering window.
+
+So the mechanism is: the driver zeroes HIMR while the chip has `ROK` set in
+HISR; on this board the chip keeps INTA asserted anyway; the intc's
+`handle_level_irq` masks, acks its own GISR latch, calls the ISR, unmasks; the
+ISR sees `irq_enabled == 0` and returns; the line is still high; the CPU
+re-takes IP3 before the interrupted softirq executes an instruction. The
+process context that would call `enable_interrupt()` — and clear HISR on its
+next real interrupt — never runs again. A level-triggered interrupt
+acknowledged at the controller but never quiesced at the source, on a
+single-core box with nowhere else to run.
+
+**Fix** (`rtlwifi-zzfix-isr-quiesce-when-disabled.patch`): in that early-return
+path, read and write-1-clear HISR/HISRE (via the hal's `interrupt_recognized()`
+plus a raw W1C of anything outside `irq_mask`), dispatching nothing, so the
+line drops and the process context can finish and re-enable. Guarded by
+`driver_is_goingto_unload` so teardown never touches a powered-down chip. The
+raw offsets are the 8192ee's; the upstream shape would be a hal op.
+
+**Validated on hardware** (fix kernel, kick off, probe armed-by-trigger only,
+cold boot, `ip link set wlan0 up; hostapd -B /etc/hostapd.conf`): the shell
+answered every 10 s for 190 s, no probe line ever printed (no softirq stayed
+pending for 200 ms), no softlockup, no reset, and `rtl_pci` in
+`/proc/interrupts` climbed 0 → 439 (t=19 s) → 2059 (57 s) → 4366 (114 s) →
+8011 (190 s): a steady ~42 interrupts/s, all serviced. `hostapd_cli status`:
+`state=ENABLED channel=6 bss[0]=wlan0 bssid[0]=00:e0:4c:81:92:b0
+ssid[0]=IWE3000N-test`. Before the fix the same sequence wedged 14–45 s in
+on every one of ~12 attempts across three days of runs. One 190 s run is not a
+soak; it is the first time the AP has ever stayed up on this board, and the
+rate is the shape of a working interrupt, not a storm.
+
+**Still open, separately:** `rok=103, rr0=103` — every genuine `ROK` interrupt
+found `rx_desc_buff_remained_cnt() == 0`. `rtl92ee_rx_desc_buff_remained_cnt()`
+returns 0 until the hardware read pointer in `REG_RXQ_TXBD_IDX` has ever been
+non-zero (`static bool start_rx`), and these all hit that. Frames are arriving
+(the chip says so) but the host is not consuming them yet. This is the next
+thing in the way of a client passing traffic, and it is where the earlier
+"RX-DMA corruption" work sits.
+
 ## Board state (current)
 
-The board runs the committed RX-refill fix and mac80211 tasklet budget, plus
-the debug-only patches above (all gated behind `/proc/rtl819x_debug_arm`,
-default off, so they don't affect normal boots). `eth0` is up, recoverable via
-the loader's TFTP at `0x00010000`, `mtd0` untouched. `wlan0` trains reliably on
-a fresh boot in current testing.
-
-Router power is switched by a Tuya smart plug (`tomada` script, local LAN
-protocol, no cloud) — this makes recovering from the freeze (which leaves the
-shell fully unresponsive; only a real power cycle clears it, same as the PCIe
-wedge above) a self-serve loop instead of needing a manual power cycle each
-time.
+Kernel with the ISR quiesce fix (`rtlwifi-zzfix-isr-quiesce-when-disabled.patch`)
+plus the RX-refill fix, mac80211 tasklet budget, and the issue #99 debug
+instrumentation (all silent by default: the timer-ISR probe auto-triggers only
+on a stuck softirq, the rest is behind `/proc/rtl819x_debug_arm` and
+`/proc/rtl819x_debug_kick`, both 0). `eth0` up; `wlan0` trains on a fresh
+boot; **hostapd reaches and holds `AP-ENABLED`** (190 s measured). Kernel at
+`0x00010000`, rootfs untouched, `mtd0` untouched, recoverable via the loader's
+TFTP as before. Router power is on a `tomada`-switched plug.
 
 ## What to do next
 
-- **M5 is still not met**: no client has associated and passed traffic. The
-  freeze happens before hostapd ever finishes bringing the AP up, so this has
-  to be fixed first.
-- Confirm the `ksoftirqd`-never-scheduled hypothesis directly: instrument (or
-  check via existing tracepoints) whether `wakeup_softirqd()` is actually
-  called during the freeze, and whether `ksoftirqd`'s task state ever leaves
-  `TASK_RUNNING`-but-not-on-CPU. If confirmed, the fix is almost certainly
-  making `handle_softirqs()`'s dispatch not depend on a scheduler handoff that
-  this `PREEMPT_NONE` platform can't deliver here — e.g. tracking down what in
-  hostapd's AP-start path prevents the CPU from ever reaching a `schedule()`
-  point (an uninterruptible busy-wait somewhere in the call chain triggered by
-  `COUNTRY_UPDATE`/AP start is the next thing to find; it has not been
-  identified yet).
-- Once fixed: re-run hostapd for a long sustained AP session (both the RX
-  corruption fix and this need re-confirming together), then get a real client
-  to associate.
-- Remove the debug-only patches listed above once the mechanism is fixed and
-  confirmed — they're marked as such in their own patch headers.
+- **M5 proper**: a real client associates and passes traffic. Nothing has
+  been tried yet on the fixed kernel. Expect the RX path to be the next wall:
+  during the storm runs every genuine `ROK` found
+  `rx_desc_buff_remained_cnt() == 0` (`rok=103, rr0=103`) — frames arriving,
+  host consuming none. Check `REG_RXQ_TXBD_IDX` read/write pointers against
+  `next_rx_rp` on the live AP first.
+- Soak the fix: an hour of AP uptime, then repeated cold boots (the wedge
+  was timing-dependent; ~12/12 before, 0/1 after is not yet statistics).
+- Then strip the issue #99 instrumentation (`DEBUG-*`, `*-zdebug-*`,
+  `/proc/rtl819x_debug_*`, `rtl_pci_dbg.h`) and turn the quiesce path into a
+  hal op for upstream.
