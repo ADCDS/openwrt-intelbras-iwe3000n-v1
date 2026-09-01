@@ -113,6 +113,10 @@ PY
     install -Dm644 "$HERE/patches/rtlwifi-rx-refill-before-hw-release.patch" \
                    "$KDIR/patches-6.18/rtlwifi-rx-refill-before-hw-release.patch"
 
+    echo "==> rtlwifi: RX ring 512 -> 64 buffers (32 MB host) -- issue #99"
+    install -Dm644 "$HERE/patches/rtlwifi-rx-ring-64.patch" \
+                   "$KDIR/patches-6.18/rtlwifi-rx-ring-64.patch"
+
     echo "==> [DEBUG] rtlwifi ISR per-branch counters -- issue #99 INTA storm"
     # rtlwifi-zdebug-* so it sorts after the refill patch above (same file).
     install -Dm644 "$HERE/patches/rtlwifi-zdebug-isr-counters.patch" \

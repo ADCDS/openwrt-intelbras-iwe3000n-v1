@@ -668,27 +668,240 @@ non-zero (`static bool start_rx`), and these all hit that. Frames are arriving
 thing in the way of a client passing traffic, and it is where the earlier
 "RX-DMA corruption" work sits.
 
+## Update: on the air, but a client cannot join yet
+
+With the fix kernel running and hostapd `ENABLED`, the build host's RT3070
+(`wlx14cc20239af1`) sees the AP for the first time in this project's history:
+`BSS 00:e0:4c:81:92:b0 freq 2437 signal -39 dBm SSID IWE3000N-test RSN`.
+Every earlier monitor-mode capture saw zero frames from this BSSID.
+
+Association fails. Host-side kernel log across four attempts:
+
+- attempt 1: `send auth (try 1/3)` → `authenticated` → `associate (try 1/3,
+  2/3, 3/3)` → `association timed out`. hostapd's `all_sta` afterwards shows
+  the client with `flags=[AUTH] aid=0`: the AP received and answered the
+  auth frame, then never processed an association request.
+- attempts 2–4: `send auth (try 1/3, 2/3, 3/3)` → `authentication timed out`.
+  No reply at all.
+- Immediately after, the same RT3070 joined the house AP in 24 ms — the
+  client is fine.
+
+So the AP's management-frame path is intermittent: RX of auth/assoc frames
+not reaching hostapd, or TX of the replies not leaving. The AP stayed alive
+throughout (no wedge — the interrupt fix holds under real client traffic).
+Which side is at fault is being read from hostapd's own `-dd` log on the AP.
+
+## Update: the AP side of the association is verified end to end
+
+Measured with the build host's RT3070 in monitor mode on channel 6:
+
+- **Beacons**: 203 in 20 s, 1 Mb/s, 11b, −29 dBm, 100 ms apart, sequence
+  numbers incrementing.
+- **Unicast management TX**: `hostapd_cli deauthenticate <mac>` frames appear
+  on the air at 1 Mb/s with correct DA/SA/BSSID, incrementing sequence
+  numbers (65, 66, 67, …), Retry set only on retries, length 26; a healthy
+  probe response to a third-party station was captured too. FCS clean on all
+  267 frames from our BSSID.
+- **Auth exchange, driven artificially**: injecting Authentication requests
+  from a fake station (`02:aa:bb:cc:dd:ee`) via the monitor vif, the AP ACKed
+  every copy the RT3070's hardware retried (the retries happened because the
+  ACKs were addressed to the spoofed SA, not the RT3070's own MAC — an
+  injection artifact), hostapd logged `authentication OK` + `authentication
+  reply`, and a textbook reply hit the air ~20 ms after the request:
+  `alg=0 transaction=2 status=0`, DA = requester, 1 Mb/s, len 30.
+- hostapd's `-dd` log for the real client: 13 auth frames received (len 30,
+  −18 dBm), a reply sent for each. No association request ever arrived.
+
+Two artifacts worth knowing about: rtlwifi reports `IEEE80211_TX_STAT_ACK`
+unconditionally (`pci.c`, `_rtl_pci_tx_isr`), so hostapd's `ack=1` in
+`Frame TX status event` means nothing; and starting `hostapd -dd` without
+redirecting its output puts it in the console foreground, where it eats every
+subsequent command — a wasted hour.
+
+So the AP receives, ACKs, answers correctly, and the answers are valid on the
+air — yet the RT3070 in station mode times out three tries in a row (it got
+one reply through, once, in the very first attempt). Next measurement: a
+monitor vif on the *same* RT3070 radio during a real attempt, to see the
+exchange from the client's own antenna, plus ftrace on the client's
+`ieee80211_rx_mgmt_auth()`.
+
+## Update: the association failure is TX latency — management frames leave ~1.3–1.9 s late
+
+Measured on the air with the RT3070 (monitor vif), against hostapd's own log:
+
+- Injected auth requests from a fake station: the AP received each one (ACKed
+  it within µs), hostapd wrote the reply 2 ms later, rtlwifi reported TX-done
+  1.7 ms after that — and the reply frame appeared on the air **1.6–1.9 s
+  after the request** (retry bursts of 7 copies ~0.5 ms apart, as expected for
+  an un-ACKing fake target).
+- A real attempt, captured from the client's own radio: five rounds of three
+  auth requests, each ACKed by the AP instantly; one reply seen, **1.3 s
+  after** its request; the rest never inside the capture window. The client's
+  window is 3 × ~100 ms, so from its point of view the AP never answers —
+  `authentication timed out`, three tries in a row, every time.
+- The MGNT ring register `REG_MGQ_TXBD_IDX` (0x3B0) reads rp == wp at every
+  sample around a transmit — the chip fetches every frame immediately. The
+  delay is between fetch and air, inside the chip.
+
+Beacons are unaffected (203 in 20 s, 100 ms apart — the BCN queue). A delay
+uniformly spread over ~2 s matches "held until the next rtlwifi 2-second
+watchdog tick" (which sends H2C commands to the firmware). A per-queue TX
+pause (`REG_TXPAUSE`, 0x522) or a firmware MACID/queue gating is the shape to
+look for; being measured next.
+
+## Update: the delay is a posted MMIO write that never gets pushed to the chip (being A/B-tested)
+
+TSF-stamped TX inside the driver (post = frame handed to the ring, done =
+TX-done processed, air = capture aligned to the AP's own beacons, alignment
+spread 0.5–1 ms):
+
+- With the stamping code doing an `rtl_read_dword()` right after each post:
+  post→done 0.2 ms, post→air **0–2 ms** — for probe responses to strangers
+  *and* for auth replies to the RT3070 (a known station). In that same run the
+  client got `authenticated` for the first time since the storm fix and moved
+  on to association.
+- Without any read after the post (all earlier runs): auth replies 1.3–1.9 s
+  late; a probe response or reply appears exactly when *something else*
+  touches a device register.
+- `devmem` reads of `REG_MGQ_TXBD_IDX` right after a `hostapd_cli deauthenticate`
+  always showed rp == wp "immediately" — but the read itself was the flush.
+
+So: MMIO writes to the RTL8192EE are posted in the RTL8196E's PCIe root
+complex and sit there until a later PCIe transaction pushes them out. The TXBD
+kick, `HIMR = 0`, the RX release at 0x3B4 — every control write — lands late
+and at a random time bounded by the next register read (the 2 s DM watchdog is
+the usual one). That is also a cleaner story for the original storm:
+`disable_interrupt()`'s `HIMR = 0` had not reached the chip when the ISR took
+its `irq_enabled == 0` exit, and the quiesce fix works because it *reads*
+HISR (which flushes the pending write) before clearing.
+
+Tested and **retracted**. Kernel A (stamps with no MMIO read at post time):
+deauths to strangers and probe responses left the radio within −1.2…0.6 ms of
+being posted (alignment slop ±1 ms) — no posted-write hold. Kernel B (A + a
+read-back after every `pci_write*`): the client's auth frames stopped being
+ACKed at all (mac80211 retried them every 20–40 ms, the no-ACK cadence), and
+userspace fell apart faster (below). The read-back patch is dropped. What the
+"read after post makes it fast" run actually showed is unresolved; the
+injected-auth stimulus produced no replies on A, so the known-station case
+is still unmeasured on a no-read kernel.
+
+What did become unmistakable on B: **the board's memory is being corrupted
+while the AP receives traffic.** With `rtl_pci` at ~27,000 interrupts,
+`grep` and `tail` took SIGSEGV on writes to address 0, one `grep` trapped on a
+reserved instruction at **EPC=0x00000000** (its return address had been
+zeroed), `cat` took SIGBUS. hostapd stayed up. This is the "RX DMA corrupts
+host memory" symptom recorded before the RX-refill fix; the fix narrowed it,
+it did not end it. It is now the blocker for M5 — nothing above it can be
+trusted until it is found. Next measurement: a kernel with
+`CONFIG_DMA_API_DEBUG` (double-mapped or mis-synced ring slots are reported
+with the driver call site) and `page_poison=1` (DMA into a freed page is
+reported on that page's next allocation), driven through the same AP-start and
+client-attempt sequence.
+
+Also observed this round: once auth completes, hostapd receives the
+association request (`association OK (aid 1)`, `Add associated STA`), but the
+board's userspace is fragile while the AP runs — plain `grep`/`tail`/`cut`
+died with `Segmentation fault` / `Bus error` on the console, the same
+"RX DMA corrupts host memory" symptom the project saw before the refill fix.
+hostapd itself stayed up. To be characterised after the A/B.
+
+## Update: the "userspace corruption" is the box running out of memory
+
+Caught red-handed on the debug kernel, in the middle of an AP session:
+
+```
+8192 pages RAM / 1529 pages reserved
+Out of memory: Killed process 69 (sh) total-vm:928kB, anon-rss:28kB, file-rss:592kB
+```
+
+32 MiB total, ~26 MiB usable, ~7.5 MiB of it the uncompressed kernel image.
+rtlwifi's RX ring is `RTL_PCI_MAX_RX_COUNT` = 512 descriptors, each backed by a
+9100-byte skb that this kernel serves as a 16 KiB page-order allocation:
+**8 MiB pinned for wifi RX**. Add hostapd, the page cache for a squashfs root,
+and the 4 MiB order-2 fragmentation that 512 such allocations impose, and
+memory pressure follows the moment the AP starts receiving. Every "corruption"
+symptom on record is a memory-pressure symptom: `Bus error` is SIGBUS from a
+squashfs-backed text page evicted and not re-readable, `Segmentation fault …
+invalid write access to 00000000` is `malloc()` returning NULL, `cat: applet
+not found` is busybox failing to map itself, and the reserved-instruction trap
+at `EPC=0x00000000` is a process whose stack page went away under it. The
+DMA-API debug run and page poisoning found nothing because there was nothing
+of that kind to find. The RX-refill patch that "fixed the corruption" earlier
+most likely helped by changing timing and allocation order, not by closing a
+DMA race.
+
+This also bears on the association failures: `dev_alloc_skb()` failing in the
+RX path silently drops the frame, so under pressure the AP simply does not
+hear some of the client's frames, and hostapd's own allocations start
+failing too. Intermittency across boots is what memory pressure looks like.
+
+Fix (`rtlwifi-rx-ring-64.patch`): RX ring 512 → 64 buffers, changing
+`RTL_PCI_MAX_RX_COUNT` and `RX_DESC_NUM_92E` together (the latter programs
+`REG_RX_RXBD_NUM`). rtlwifi builds two RX rings (`RTL_PCI_MAX_RX_QUEUE` = 2),
+so the old configuration pinned 2 × 512 × 16 KiB = 16 MiB; the new one 2 MiB.
+
+**Measured, same boot sequence, before → after:**
+
+| | 512-entry rings | 64-entry rings |
+|---|---|---|
+| MemFree at boot | 3,668 kB | **12,816 kB** |
+| Slab at boot | 19,436 kB (19,088 unreclaimable) | **4,732 kB** |
+| MemFree with hostapd up | (box unusable) | 10,924 kB |
+| after client + traffic | — | 10,828 kB, `dmesg` OOM/SIGSEGV/SIGBUS count **0** |
+
+## M5 reached: a real client associates and passes traffic
+
+On the 64-ring kernel (storm quiesce fix + RX refill fix + ring size), cold
+boot, `hostapd -B /etc/hostapd.conf`, the build host's RT3070 as the client
+(NetworkManager profile, WPA2-PSK, static `192.168.50.2/24`):
+
+```
+wlx14cc20239af1: authenticated
+wlx14cc20239af1: RX AssocResp from 00:e0:4c:81:92:65 (capab=0x411 status=0 aid=1)
+wlx14cc20239af1: associated
+Connected to 00:e0:4c:81:92:65 (on wlx14cc20239af1)  SSID: IWE3000N-test
+```
+
+hostapd: `14:cc:20:23:9a:f1 flags=[AUTH][ASSOC][AUTHORIZED][SHORT_PREAMBLE][WMM][HT]`
+— the 4-way handshake completed. Traffic: host→AP `ping -c 20 -i 0.2`
+**19/20 received**; AP→host `ping -c 10` **10/10, 0% loss**. First
+association ever on this board. Heavier traffic and a soak are the next
+measurements (below).
+
+Retrospective, briefly: three distinct faults stacked. (1) A level INTA storm
+through the ISR's `irq_enabled == 0` exit froze the box on every AP start
+(fixed by quiescing the chip in that path). (2) Memory: the driver's default
+16 MiB of RX rings on a 32 MiB host, which surfaced as SIGBUS/SIGSEGV/OOM and,
+through failed skb allocations, as an AP that intermittently did not hear its
+client. (3) Two false trails on the way — a `raise_softirq()` "fix" that was
+console-print timing, and a posted-write theory that A/B testing killed. The
+1.3–1.9 s auth-reply delays measured on the 512-ring kernels were real; their
+mechanism was never pinned down and they do not reproduce on the 64-ring
+kernel, so memory pressure in the TX path is the leading explanation, not a
+proven one.
+
 ## Board state (current)
 
-Kernel with the ISR quiesce fix (`rtlwifi-zzfix-isr-quiesce-when-disabled.patch`)
-plus the RX-refill fix, mac80211 tasklet budget, and the issue #99 debug
-instrumentation (all silent by default: the timer-ISR probe auto-triggers only
-on a stuck softirq, the rest is behind `/proc/rtl819x_debug_arm` and
-`/proc/rtl819x_debug_kick`, both 0). `eth0` up; `wlan0` trains on a fresh
-boot; **hostapd reaches and holds `AP-ENABLED`** (190 s measured). Kernel at
-`0x00010000`, rootfs untouched, `mtd0` untouched, recoverable via the loader's
-TFTP as before. Router power is on a `tomada`-switched plug.
+Kernel: storm quiesce fix, RX refill fix, RX ring 64, plus the issue #99
+debug instrumentation (timer-ISR storm probe auto-triggered only on a stuck
+softirq; ISR counters; `/proc/rtl819x_debug_*` toggles, all default off).
+`eth0` up; hostapd `ENABLED`; a real client associates, authorizes and passes
+traffic; MemFree ~10.8 MiB with the AP and a client up. Kernel at
+`0x00010000`, rootfs and `mtd0` untouched, loader TFTP recovery as before.
+Router power on a `tomada`-switched plug.
 
 ## What to do next
 
-- **M5 proper**: a real client associates and passes traffic. Nothing has
-  been tried yet on the fixed kernel. Expect the RX path to be the next wall:
-  during the storm runs every genuine `ROK` found
-  `rx_desc_buff_remained_cnt() == 0` (`rok=103, rr0=103`) — frames arriving,
-  host consuming none. Check `REG_RXQ_TXBD_IDX` read/write pointers against
-  `next_rx_rp` on the live AP first.
-- Soak the fix: an hour of AP uptime, then repeated cold boots (the wedge
-  was timing-dependent; ~12/12 before, 0/1 after is not yet statistics).
+- Soak: an hour of client traffic, then repeated cold boots with association
+  each time (association was 1/1 on the 64-ring kernel; the flakiness before
+  was memory-driven and memory is now measured, but one run is one run).
+- The wifi MAC is different every boot (`00:e0:4c:81:92:xx`, last byte
+  random): the efuse MAC read is wrong in one byte. Cosmetic for a bench AP,
+  wrong for a product; look at `_rtl92ee_read_adapter_info()`.
+- The 1.3–1.9 s management-TX delays seen under memory pressure: either
+  reproduce on purpose (shrink RAM with `mem=`) and pin the mechanism, or
+  record them as resolved-by-consequence.
 - Then strip the issue #99 instrumentation (`DEBUG-*`, `*-zdebug-*`,
   `/proc/rtl819x_debug_*`, `rtl_pci_dbg.h`) and turn the quiesce path into a
-  hal op for upstream.
+  hal op for upstream; consider upstreaming the ring-size knob as a module
+  parameter.

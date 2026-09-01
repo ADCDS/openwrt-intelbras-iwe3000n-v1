@@ -1,0 +1,40 @@
+rtlwifi: rtl8192ee: shrink the RX ring from 512 to 64 buffers for a 32 MB host
+
+The RX ring is RTL_PCI_MAX_RX_COUNT (512) descriptors, each backed by a
+9100-byte skb, which on this kernel is a 16 KiB page-order allocation: 8 MiB of
+RAM pinned for RX on an RTL8196E with 32 MiB total, of which ~7.5 MiB is the
+kernel image. Once hostapd and its page cache are added the box runs out of
+memory ("Out of memory: Killed process 69 (sh)" in the middle of an AP
+session), and long before the OOM killer fires, squashfs-backed code pages get
+evicted and fail to come back -- SIGBUS ("Bus error") in busybox, malloc
+failures that surface as SIGSEGV at address 0, and "applet not found". Those
+were previously read as RX-DMA memory corruption.
+
+64 descriptors is 1 MiB. The hardware ring size register (REG_RX_RXBD_NUM) is
+programmed from RX_DESC_NUM_92E and the driver's ring bookkeeping from
+RTL_PCI_MAX_RX_COUNT, so both change together.
+
+diff -Naur a/drivers/net/wireless/realtek/rtlwifi/pci.h b/drivers/net/wireless/realtek/rtlwifi/pci.h
+--- a/drivers/net/wireless/realtek/rtlwifi/pci.h	2026-09-01 18:28:12.516356020 -0300
++++ b/drivers/net/wireless/realtek/rtlwifi/pci.h	2026-09-01 18:28:12.524356305 -0300
+@@ -12,7 +12,7 @@
+ #define RTL_PCI_RX_CMD_QUEUE			1
+ #define RTL_PCI_MAX_RX_QUEUE			2
+ 
+-#define RTL_PCI_MAX_RX_COUNT			512/*64*/
++#define RTL_PCI_MAX_RX_COUNT			64
+ #define RTL_PCI_MAX_TX_QUEUE_COUNT		9
+ 
+ #define RT_TXDESC_NUM				128
+diff -Naur a/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/def.h b/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/def.h
+--- a/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/def.h	2026-09-01 18:28:12.524356305 -0300
++++ b/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/def.h	2026-09-01 18:28:12.528356448 -0300
+@@ -4,7 +4,7 @@
+ #ifndef __RTL92E_DEF_H__
+ #define __RTL92E_DEF_H__
+ 
+-#define RX_DESC_NUM_92E					512
++#define RX_DESC_NUM_92E					64
+ 
+ #define HAL_PRIME_CHNL_OFFSET_DONT_CARE			0
+ #define HAL_PRIME_CHNL_OFFSET_LOWER			1
