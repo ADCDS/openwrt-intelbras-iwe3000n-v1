@@ -196,6 +196,41 @@ big-endian — does not. Finding it needs a runtime memory-poison/bisection or a
 line-by-line DMA comparison against the vendor driver. This is real, open-ended
 work: the same "changes the project's cost" boundary, now at the DMA layer.
 
+## Update: the corruption is a softirq livelock in the interrupt-driven path
+
+Further debugging (interrupt live, ISR instrumented) pinned the *shape* of the
+bug even though not the exact line:
+
+- The **ring setup is correct** — read on hardware: the `dma_alloc_coherent` RX
+  ring is uncached (`virt=0xa0a68000`, KSEG1), and the RX buffer DMA addresses
+  are sane and 1:1 (`tail=0x81a6c020 -> dma=0x1a6c020`), spanning both memory
+  halves.
+- On the **stable (interrupt-inert) kernel the chip still DMAs and there is zero
+  corruption** — so the chip's DMA to the right buffers is fine. Corruption
+  appears **only when the ISR runs**. It is a driver-software bug in the
+  interrupt-driven path, not the DMA engine.
+- The hang is a **soft lockup at 100% softirq** (`handle_softirqs`, hostapd
+  context) — a wifi tasklet/softirq livelocks, and while spinning it scribbles
+  random memory (unrelated processes SIGSEGV at random addresses). RX-only
+  (`ip link set wlan0 up`) can be stable; the **beacon/AP path (hostapd)** is
+  what livelocks.
+- It is **timing/layout dependent**: reserving 192 KiB at the top of DRAM
+  (for ramoops) made the RX path stable in one build while the beacon path still
+  livelocked. That points at a reentrancy/ordering issue or a DMA over-write
+  near a specific region, not a fixed wrong address.
+
+Ruled out on hardware, in addition to the earlier list: descriptor endianness,
+RX length bounds, RX ring pointer math, coherency (non-coherent + cache-managed),
+inbound translation, DMA mask, MPS, and buffer sizing (whole-page RX buffers, so
+no cache-line straddle with other allocations).
+
+Capturing the exact faulting handler defeated the usual tools: the 38400 console
+starves during the livelock so `pr_info` never flushes, and the RealTek loader
+clears DRAM on reset so ramoops does not survive. Pinning it needs JTAG, or
+upstream rtlwifi big-endian expertise, or a differential trace against the vendor
+`rtl8192cd` -- the same "changes the project's cost" boundary, now at the last
+layer. The efuse and interrupt fixes stand regardless.
+
 ## Board state
 
 The RX corruption makes the board unstable once the radio runs, so the board is
