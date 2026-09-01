@@ -270,6 +270,21 @@ cmd_rootfs() {
         fi
     done
 
+    echo "==> userspace"
+    # hostapd is not optional: mac80211 has no in-kernel AP mode, and upstream
+    # ships no hostapd, iw or wpa_supplicant at all. Built by
+    # tools/build-hostapd.sh against libnl-tiny.
+    local u
+    # sbin/, not usr/sbin/: skeleton/usr/sbin is a symlink to
+    # /userdata/usr/sbin -- the partition this board does not have -- and
+    # install -D refuses to create a directory over a symlink, so the
+    # binaries silently never arrived while the .conf did.
+    for u in sbin/hostapd sbin/hostapd_cli etc/hostapd.conf; do
+        [ -f "$HERE/files/rootfs/$u" ] && \
+            install -Dm755 "$HERE/files/rootfs/$u" "$sk/$u" && echo "    $u"
+    done
+    [ -f "$sk/etc/hostapd.conf" ] && chmod 644 "$sk/etc/hostapd.conf"
+
     docker image inspect "$IMG" >/dev/null 2>&1 || die "no $IMG image; run ./build.sh deps"
     docker run --rm -v "$UP:/workspace" \
         -w /workspace/3-Main-SoC-Realtek-RTL8196E/33-Rootfs \

@@ -55,7 +55,11 @@ cd "hostapd-${HOSTAPD_VER}/hostapd"
 # Every option left out is bytes that do not have to fit in a 1600 KiB rootfs.
 cat > .config <<'EOC'
 CONFIG_DRIVER_NL80211=y
-CONFIG_LIBNL32=y
+# CONFIG_LIBNL_TINY, not LIBNL32: the latter makes hostapd's Makefile ask
+# pkg-config for libnl-3.0 and link -lnl-3 -lnl-genl-3, neither of which
+# exists in a cross sysroot. LIBNL_TINY links -lnl-tiny directly, which is
+# what OpenWrt does on every router build.
+CONFIG_LIBNL_TINY=y
 CONFIG_IEEE80211N=y
 CONFIG_WPA=y
 CONFIG_NO_RADIUS=y
@@ -67,10 +71,16 @@ CONFIG_INTERNAL_LIBTOMMATH=y
 CONFIG_ELOOP=eloop
 EOC
 
-make CC="$CC" \
-     CFLAGS="-O2 -I${NLDIR}/include -DCONFIG_LIBNL20" \
-     LIBS="-L${NLDIR} -lnl-tiny" \
-     -j"$(nproc)" hostapd hostapd_cli
+# CFLAGS/LIBS go through the ENVIRONMENT, not the make command line. hostapd's
+# Makefile does "CFLAGS += -I../src -I../src/utils", and a command-line
+# assignment overrides that append entirely -- every file then fails with
+# "fatal error: utils/includes.h: No such file or directory".
+# _GNU_SOURCE: libnl-tiny's msg.h uses struct ucred, which musl only
+# declares under _GNU_SOURCE. Without it every nl80211 file fails with
+# "field 'nm_creds' has incomplete type".
+export CFLAGS="-O2 -D_GNU_SOURCE -I${NLDIR}/include -DCONFIG_LIBNL20"
+export LIBS="-L${NLDIR} -lnl-tiny"
+make CC="$CC" -j"$(nproc)" hostapd hostapd_cli
 
 "${CROSS}-strip" hostapd hostapd_cli
 cp hostapd hostapd_cli "$OUT/"
