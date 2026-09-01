@@ -11,6 +11,7 @@
 #   ./build.sh deps     build the toolchain docker image (~45 min, ~8 GB)
 #   ./build.sh overlay  apply this port's files to the upstream tree
 #   ./build.sh kernel   overlay, then build the kernel in docker
+#   ./build.sh rootfs   fix the /etc symlinks, then build the squashfs
 #   ./build.sh shell    a shell in the builder container
 #
 # Nothing here writes to the device. Flashing is a separate, deliberate step —
@@ -176,6 +177,31 @@ PY
     echo "on the stage 1 result from pci-rtl819x.c. See docs/WIFI-PLAN.md."
 }
 
+cmd_rootfs() {
+    need_upstream
+    local sk="$UP/3-Main-SoC-Realtek-RTL8196E/33-Rootfs/skeleton"
+
+    echo "==> replacing dangling /etc symlinks with real files"
+    # Upstream points these at /userdata, the 12 MB partition their boards have
+    # and this one does not. On a 448 KiB overlay they dangle and login is
+    # impossible. See files/rootfs/README.md.
+    local n
+    for n in passwd group; do
+        if [ -L "$sk/etc/$n" ] || [ ! -s "$sk/etc/$n" ]; then
+            rm -f "$sk/etc/$n"
+            install -Dm644 "$HERE/files/rootfs/etc/$n" "$sk/etc/$n"
+            echo "    /etc/$n now a real file"
+        else
+            echo "    /etc/$n already a real file"
+        fi
+    done
+
+    docker image inspect "$IMG" >/dev/null 2>&1 || die "no $IMG image; run ./build.sh deps"
+    docker run --rm -v "$UP:/workspace" \
+        -w /workspace/3-Main-SoC-Realtek-RTL8196E/33-Rootfs \
+        "$IMG" bash -c './build_rootfs.sh'
+}
+
 cmd_kernel() {
     cmd_overlay
     docker image inspect "$IMG" >/dev/null 2>&1 || die "no $IMG image; run ./build.sh deps"
@@ -191,6 +217,7 @@ case "${1:-}" in
     deps)    cmd_deps ;;
     overlay) cmd_overlay ;;
     kernel)  cmd_kernel ;;
+    rootfs)  cmd_rootfs ;;
     shell)   cmd_shell ;;
     *)       sed -n '3,16p' "$0"; exit 1 ;;
 esac
