@@ -123,6 +123,20 @@ PY
         echo "    already present"
     fi
 
+    echo "==> [3e] firmware for CONFIG_EXTRA_FIRMWARE"
+    # EXTRA_FIRMWARE_DIR is relative to the kernel source tree. Staging the
+    # blobs directly into that tree does NOT work: cmd_kernel wipes the tree
+    # (IMEM_POLICY_DISABLE needs a clean one) after this step runs, so they
+    # vanish before the build and the image comes out the same size with no
+    # firmware in it. Put them in files-6.18/ instead -- upstream copies that
+    # over the tree *after* extraction, which is exactly the right moment.
+    local b
+    for b in rtlwifi/rtl8192eefw.bin regulatory.db regulatory.db.p7s; do
+        [ -f "$HERE/files/rootfs/lib/firmware/$b" ] && \
+            install -Dm644 "$HERE/files/rootfs/lib/firmware/$b" "$f/firmware/$b"
+    done
+    echo "    staged into files-6.18/firmware/"
+
     echo "==> [4/4] BOARD map in upstream's build_kernel.sh"
     local bk="$KDIR/build_kernel.sh"
     if ! grep -q "iwe3000n)" "$bk"; then
@@ -169,12 +183,43 @@ want = {
     "CONFIG_RTL_CARDS": "CONFIG_RTL_CARDS=y",
     "CONFIG_RTL8192EE": "CONFIG_RTL8192EE=y",
     "CONFIG_FW_LOADER": "CONFIG_FW_LOADER=y",
+    # The radio driver is built in, so it probes at ~3 s during kernel init --
+    # before the rootfs is mounted. A blob in /lib/firmware can never be there
+    # in time and the load fails with -2. Link them into the image instead.
+    # Costs ~37 KB of the kernel partition, which is the only place they work.
+    "CONFIG_EXTRA_FIRMWARE": 'CONFIG_EXTRA_FIRMWARE="rtlwifi/rtl8192eefw.bin regulatory.db regulatory.db.p7s"',
+    # Absolute, inside the container. A relative path resolves against the
+    # kernel tree, and upstream's overlay rsync copies only arch/, drivers/,
+    # include/ and Documentation/ -- never firmware/ -- so blobs put there
+    # never arrive and the build dies with "No rule to make target
+    # 'firmware/rtlwifi/rtl8192eefw.bin'".
+    "CONFIG_EXTRA_FIRMWARE_DIR": 'CONFIG_EXTRA_FIRMWARE_DIR="/workspace/3-Main-SoC-Realtek-RTL8196E/32-Kernel/files-6.18/firmware"',
     # zboot places the compressed image immediately after the decompressed one
     # when this is 0x0 (auto). With the wireless stack the kernel decompresses
     # to ~7 MB and the auto address landed at 0x806e0000 -- no margin -- and the
     # board jumped to it and went silent, decompressor overwriting its own
     # source. Pin it well clear: 16 MB into a 32 MB part, leaving ~14 MB above.
-    "CONFIG_ZBOOT_LOAD_ADDRESS": "CONFIG_ZBOOT_LOAD_ADDRESS=0x81000000",
+    # Left on auto (0x0). Pinning it to 0x81000000 to get clear of the
+    # decompressed kernel made the loader jump there and hang: every boot that
+    # has ever worked on this board had an entry just above the loader's own
+    # 0x80500000 staging area (0x805a0000), so it appears to stage the image at
+    # the header's address and cannot place it 16 MB up. Auto-placement has
+    # room again now the kernel is trimmed.
+    "CONFIG_ZBOOT_LOAD_ADDRESS": "CONFIG_ZBOOT_LOAD_ADDRESS=0x0",
+    # Size. The loader refuses a 1.9 MB kernel: it prints checksum/burn address
+    # and then scans "no sys signature at 000NN000!" from kernel_start+0x1000
+    # and gives up without writing. A 1.5 MB kernel writes fine. Whatever the
+    # exact limit is, the wireless stack has to be paid for somewhere, and
+    # these are the cheapest things on this board.
+    #
+    # IPv6: nothing in this project uses it; the stock firmware had it but this
+    # is a 2.4 GHz AP on a 4 MB part.
+    # RTLWIFI_DEBUG: pure format strings and tracing in the radio driver.
+    "CONFIG_IPV6": "# CONFIG_IPV6 is not set",
+    "CONFIG_RTLWIFI_DEBUG": "# CONFIG_RTLWIFI_DEBUG is not set",
+    "CONFIG_CFG80211_DEBUGFS": "# CONFIG_CFG80211_DEBUGFS is not set",
+    "CONFIG_MAC80211_DEBUGFS": "# CONFIG_MAC80211_DEBUGFS is not set",
+    "CONFIG_MAC80211_MESH": "# CONFIG_MAC80211_MESH is not set",
 }
 out, seen = [], set()
 for line in s:
@@ -217,11 +262,13 @@ cmd_rootfs() {
     # rtl8192ee asks the firmware loader for this by name at probe. It is not
     # built into the kernel (EXTRA_FIRMWARE would put it in the 1984 KiB kernel
     # partition instead of the roomier rootfs), so it lives here.
-    if [ -f "$HERE/files/rootfs/lib/firmware/rtlwifi/rtl8192eefw.bin" ]; then
-        install -Dm644 "$HERE/files/rootfs/lib/firmware/rtlwifi/rtl8192eefw.bin" \
-                       "$sk/lib/firmware/rtlwifi/rtl8192eefw.bin"
-        echo "    rtlwifi/rtl8192eefw.bin ($(stat -c %s "$HERE/files/rootfs/lib/firmware/rtlwifi/rtl8192eefw.bin") bytes)"
-    fi
+    local fw
+    for fw in rtlwifi/rtl8192eefw.bin regulatory.db regulatory.db.p7s; do
+        if [ -f "$HERE/files/rootfs/lib/firmware/$fw" ]; then
+            install -Dm644 "$HERE/files/rootfs/lib/firmware/$fw" "$sk/lib/firmware/$fw"
+            echo "    $fw ($(stat -c %s "$HERE/files/rootfs/lib/firmware/$fw") bytes)"
+        fi
+    done
 
     docker image inspect "$IMG" >/dev/null 2>&1 || die "no $IMG image; run ./build.sh deps"
     docker run --rm -v "$UP:/workspace" \

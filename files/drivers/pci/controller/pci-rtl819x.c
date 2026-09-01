@@ -193,10 +193,17 @@ static void __iomem *rtl819x_pcie_map_bus(struct pci_bus *bus,
 	return NULL;
 }
 
+/*
+ * 32-bit accesses only. With the byte/word accessors the root port's header
+ * type register read back as 0x10 -- not a valid header type at all -- and the
+ * PCI core logged "unknown header type 16, ignoring device" and refused to
+ * enumerate anything behind it. The _32 variants read the containing dword and
+ * shift, which this config window is happy with.
+ */
 static struct pci_ops rtl819x_pcie_ops = {
 	.map_bus = rtl819x_pcie_map_bus,
-	.read	 = pci_generic_config_read,
-	.write	 = pci_generic_config_write,
+	.read	 = pci_generic_config_read32,
+	.write	 = pci_generic_config_write32,
 };
 
 static int rtl819x_pcie_probe(struct platform_device *pdev)
