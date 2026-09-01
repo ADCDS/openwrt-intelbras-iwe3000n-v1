@@ -192,10 +192,10 @@ static int rtl819x_pcie_probe(struct platform_device *pdev)
 		return PTR_ERR(pcie->phy);
 
 	pcie->sysc = syscon_regmap_lookup_by_phandle(pdev->dev.of_node,
-						     "realtek,sysc");
+						     "realtek,syscon");
 	if (IS_ERR(pcie->sysc))
 		return dev_err_probe(&pdev->dev, PTR_ERR(pcie->sysc),
-				     "no realtek,sysc phandle: the PCIe clock lives there\n");
+				     "no realtek,syscon phandle: the PCIe clock lives there\n");
 
 	ret = rtl819x_pcie_phy_reset(pcie);
 	if (ret)

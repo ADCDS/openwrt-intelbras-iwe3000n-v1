@@ -159,6 +159,15 @@
 			      <0x00b10000 0x1000>,
 			      <0x00b01000 0x1000>;
 			reg-names = "rc-cfg", "dev-cfg", "phy";
+
+			/*
+			 * The PCIe clock and the MDIO reset live in the system
+			 * controller, not in the PCIe block. Without them the PHY
+			 * never runs and LTSSM reads 0x00 forever -- which is
+			 * exactly what the first attempt on this board did.
+			 */
+			realtek,syscon = <&sysc>;
+
 			status = "okay";
 		};
 	};
