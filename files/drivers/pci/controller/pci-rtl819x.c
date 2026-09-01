@@ -38,8 +38,10 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/regmap.h>
 #include <linux/platform_device.h>
 #include <linux/time64.h>
 
@@ -60,27 +62,82 @@
 /* Config-space offsets we read back for the log line. */
 #define RTL819X_CFG_VENDOR_DEVICE	0x0000
 
+/*
+ * System-controller registers. The PHY block above is not enough on its own:
+ * the first attempt reset a PHY that had never been clocked and LTSSM read
+ * 0x00 forever -- not a state, just a dead register. The vendor's full
+ * sequence in 8192cd_host.c turns the clock on first, resets the MDIO, and
+ * only then releases the PHY, with a 10 ms settle between every step.
+ */
+#define RTL819X_SYSC_CLKEN		0x0010
+#define  RTL819X_CLK_LX_PCIE		0x0500	/* "Active LX & PCIE Clock" */
+#define  RTL819X_PCIE0_PHY_RST		BIT(24)
+#define RTL819X_SYSC_PCIE0_MDIO		0x003c
+#define  RTL819X_MDIO_RST		BIT(0)
+#define  RTL819X_MDIO_LOAD_DONE		BIT(1)
+
+/* The vendor sleeps 10 ms after each step. Nothing documents why, and the
+ * first attempt skipped them entirely, so keep them. */
+#define RTL819X_SETTLE_MS		10
+
 struct rtl819x_pcie {
 	struct device *dev;
 	void __iomem *rc_cfg;		/* root complex config space   */
 	void __iomem *dev_cfg;		/* downstream device config    */
 	void __iomem *phy;		/* PHY power/reset control     */
+	struct regmap *sysc;		/* system controller: clocks   */
 };
 
 static int rtl819x_pcie_phy_reset(struct rtl819x_pcie *pcie)
 {
-	/*
-	 * Vendor sequence, verbatim in effect:
-	 *	REG32(phy) = 0x01;	LTSSM enabled, PHY held in reset
-	 *	REG32(phy) = 0x81;	PHY reset released
-	 *
-	 * The two writes are ordered and the vendor inserts no delay between
-	 * them. Keep it that way until there is evidence a delay is needed.
-	 */
+	int ret;
+
+	/* 1. Clock the PCIe block. Without this nothing else has any effect:
+	 *    the PHY registers accept writes and the LTSSM stays at 0x00. */
+	ret = regmap_update_bits(pcie->sysc, RTL819X_SYSC_CLKEN,
+				 RTL819X_CLK_LX_PCIE, RTL819X_CLK_LX_PCIE);
+	if (ret)
+		return ret;
+	msleep(RTL819X_SETTLE_MS);
+
+	/* 2. MDIO reset, deasserted in two steps. */
+	ret = regmap_write(pcie->sysc, RTL819X_SYSC_PCIE0_MDIO,
+			   RTL819X_MDIO_RST);
+	if (ret)
+		return ret;
+	msleep(RTL819X_SETTLE_MS);
+
+	ret = regmap_write(pcie->sysc, RTL819X_SYSC_PCIE0_MDIO,
+			   RTL819X_MDIO_RST | RTL819X_MDIO_LOAD_DONE);
+	if (ret)
+		return ret;
+	msleep(RTL819X_SETTLE_MS);
+
+	/* 3. PHY out of reset, LTSSM enabled. */
 	writel(RTL819X_PHY_LTSSM_EN, pcie->phy + RTL819X_PHY_PWRCR);
+	msleep(RTL819X_SETTLE_MS);
 	writel(RTL819X_PHY_LTSSM_EN | RTL819X_PHY_RESET_N,
 	       pcie->phy + RTL819X_PHY_PWRCR);
+	msleep(RTL819X_SETTLE_MS);
 
+	/*
+	 * 4. The system controller's own PHY-reset bit, last. The vendor's
+	 *    comment on this write is just "PCIE PHY Reset On:Port 0".
+	 */
+	ret = regmap_update_bits(pcie->sysc, RTL819X_SYSC_CLKEN,
+				 RTL819X_PCIE0_PHY_RST, RTL819X_PCIE0_PHY_RST);
+	if (ret)
+		return ret;
+	msleep(RTL819X_SETTLE_MS);
+
+	/*
+	 * UNVERIFIED, deliberately not done: the vendor also writes
+	 * 0xcc011901 to the PHY block's offset 0x000, but only under
+	 * #ifdef OUT_CYSTALL -- boards clocked from an external crystal.
+	 * Whether the IWE 3000N is one is unknown, so it is left out rather
+	 * than guessed. If the link still does not train, this is the next
+	 * thing to try.
+	 */
 	return 0;
 }
 
@@ -98,8 +155,12 @@ static int rtl819x_pcie_wait_link(struct rtl819x_pcie *pcie)
 				 (val & RTL819X_LTSSM_STATE) == RTL819X_LTSSM_L0,
 				 100 * USEC_PER_MSEC, USEC_PER_SEC);
 	if (ret) {
-		dev_err(pcie->dev, "link training failed, LTSSM = 0x%02x\n",
-			(u32)(val & RTL819X_LTSSM_STATE));
+		u32 st = val & RTL819X_LTSSM_STATE;
+
+		dev_err(pcie->dev, "link training failed, LTSSM = 0x%02x\n", st);
+		if (!st)
+			dev_err(pcie->dev,
+				"LTSSM reads 0 -- the PHY is not running, not merely unlinked\n");
 		return ret;
 	}
 
@@ -129,6 +190,12 @@ static int rtl819x_pcie_probe(struct platform_device *pdev)
 	pcie->phy = devm_platform_ioremap_resource_byname(pdev, "phy");
 	if (IS_ERR(pcie->phy))
 		return PTR_ERR(pcie->phy);
+
+	pcie->sysc = syscon_regmap_lookup_by_phandle(pdev->dev.of_node,
+						     "realtek,sysc");
+	if (IS_ERR(pcie->sysc))
+		return dev_err_probe(&pdev->dev, PTR_ERR(pcie->sysc),
+				     "no realtek,sysc phandle: the PCIe clock lives there\n");
 
 	ret = rtl819x_pcie_phy_reset(pcie);
 	if (ret)
