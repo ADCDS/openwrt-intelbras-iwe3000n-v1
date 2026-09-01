@@ -169,16 +169,39 @@
 			bus-range = <0x00 0x01>;
 
 			/*
-			 * 32-bit non-prefetchable memory, mapped 1:1. The vendor
-			 * programs the device's BARs to 0x18c00000 and
-			 * 0x19000000 directly, so CPU and PCI addresses agree
-			 * and 8 MB from 0x18c00000 covers both. Under Linux the
-			 * PCI core assigns from this window rather than the
-			 * hardcoded values.
+			 * ONE window, memory, at the memory aperture. From the
+			 * RTL8196E's own bspchip.h:
+			 *
+			 *   BSP_PCIE0_D_IO  0xB8C00000  -> phys 0x18C00000
+			 *   BSP_PCIE0_D_MEM 0xB9000000  -> phys 0x19000000
+			 *
+			 * The endpoint's MMIO BAR (BAR 2, the only one rtl8192ee
+			 * uses) must land in the *memory* aperture so CPU reads
+			 * reach it as memory transactions. The very first version
+			 * of this node declared 0x18c00000 as memory; that is the
+			 * I/O aperture, so BAR 2 was assigned there, every
+			 * register access went out as an I/O TLP instead of a
+			 * memory one, and the driver failed with
+			 * "rtl8192ee: Init MAC failed" while the link trained and
+			 * config space read fine throughout.
+			 *
+			 * No I/O range is declared, deliberately. The RTL8192EE
+			 * advertises a 0x100-byte I/O BAR (BAR 0) that the driver
+			 * never touches; leaving it unassigned costs nothing but a
+			 * warning. Declaring an I/O range instead makes the
+			 * generic host-bridge code call devm_pci_remap_iospace()
+			 * -> vmap_page_range(), which BUGs on this Lexra MIPS --
+			 * it has no PCI_IOBASE fixmap region to map the aperture
+			 * into (kernel BUG at vmap_page_range, probe never
+			 * returns). Memory-only is both sufficient and safe.
+			 *
+			 * Parent address is soc-bus-relative: soc's ranges are
+			 * <0 0x18000000 0x04000000>, so 0x01000000 here is
+			 * physical 0x19000000.
 			 */
-			ranges = <0x02000000 0x0 0x18c00000
-				  0x00c00000
-				  0x0 0x00800000>;
+			ranges = <0x02000000 0x0 0x19000000
+				  0x01000000
+				  0x0 0x01000000>;
 
 			#interrupt-cells = <1>;
 			interrupt-map-mask = <0 0 0 0>;

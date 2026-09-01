@@ -68,11 +68,18 @@ extraction.
 
 ## Known, not yet addressed
 
-- **`rtlwifi: RTL8XXX did not boot from eeprom, check it !!`** — this board has
-  no EEPROM; its calibration is in the H601 block at `mtd0+0x6000`. The driver
-  falls back to defaults, which is probably why the MAC is also wrong. Reading
-  the real values out of `mtd0` is future work and shares the `nvmem-cell`
-  mechanism the ethernet MAC needs (see `M2-ETHERNET.md`).
-- **`BAR 0 [io size 0x0100]: can't assign; no space`** — the endpoint asks for
-  an I/O BAR and the DT `ranges` declares only memory. rtlwifi uses MMIO, so
-  this is harmless, but an `0x01000000` I/O range could be added to silence it.
+- **`rtlwifi: RTL8XXX did not boot from eeprom, check it !!`** — this appeared on
+  every boot up to M4 and seeded a wrong theory (missing efuse). It was a
+  *symptom* of the BAR 2 aperture bug, not a hardware fact: the autoload-status
+  read goes through MMIO, and MMIO was landing in I/O space. Once `ranges` was
+  corrected (see `M5-AP.md`) the warning disappeared and MAC init succeeded.
+- **The MAC is the Realtek default `00:e0:4c:...`, not the board's.** The real
+  MAC and RF calibration are in the H601 block at `mtd0+0x6000`. Feeding them to
+  the driver is future work and shares the `nvmem-cell` mechanism the ethernet
+  MAC needs (see `M2-ETHERNET.md`). It does not affect whether the radio works.
+- **`BAR 0 [io size 0x0100]: can't assign; no space`** — the endpoint asks for a
+  0x100-byte I/O BAR the driver never uses, and the DT declares no I/O range.
+  **Leave it that way.** Adding an I/O range does not silence it harmlessly — it
+  makes the generic host bridge call `devm_pci_remap_iospace()` →
+  `vmap_page_range()`, which BUGs on this Lexra MIPS (no `PCI_IOBASE` fixmap).
+  See `M5-AP.md` for the full trace. The warning is the correct outcome.

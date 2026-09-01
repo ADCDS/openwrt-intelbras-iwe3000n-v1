@@ -1,15 +1,20 @@
 # openwrt-intelbras-iwe3000n-v1
 
 OpenWrt for the **Intelbras IWE 3000N v1** — RealTek **RTL8196E**, 4 MB flash,
-32 MB RAM, RTL8192ER 2.4 GHz radio.
+32 MB RAM, RTL8192EE 2.4 GHz radio.
 
-> ## Status: **nothing works yet. Nothing has been built yet.**
+> ## Status: **it boots, routes, and beacons.** jnilo1 Linux 6.18 on the board.
 >
-> This repo is a plan and an assessment, not a build recipe. There is no
-> `build.sh`, no image, no boot. Do not expect to flash anything from here.
+> M1–M6 are verified on hardware and committed. The board runs a 1784 KiB
+> kernel + squashfs rootfs flashed over the loader's TFTP: ethernet works, the
+> RTL8192EE comes up over a from-scratch PCIe host driver, and `hostapd` brings
+> up a WPA2 AP that reaches `AP-ENABLED`. The one thing left is a real client
+> associating and passing traffic, which needs a person with a phone — see
+> [`docs/M5-AP.md`](docs/M5-AP.md). Per-milestone results are in `docs/M*.md`.
 >
-> Compare [`../../dir842/openwrt-dlink-dir842-r1`](../../dir842/openwrt-dlink-dir842-r1),
-> which is what this becomes if it works out.
+> `./build.sh kernel` and `./build.sh rootfs` build the images; recovery to
+> stock is [`../iwe3000n-firmware/RESTORE-TO-STOCK.md`](../iwe3000n-firmware/RESTORE-TO-STOCK.md).
+> Compare [`../../dir842/openwrt-dlink-dir842-r1`](../../dir842/openwrt-dlink-dir842-r1).
 
 ## Read this first
 
@@ -27,7 +32,7 @@ work, and what they got working.
 | SoC | RealTek **RTL8196E** — Lexra **RLX5281**, ~400 MHz, MIPS16, 32 TLB entries |
 | RAM | **32 MB** (`MemTotal: 29284 kB`) |
 | Flash | **4 MB**, 4 KB erase — layout in [`../iwe3000n-firmware/PARTITIONS.md`](../iwe3000n-firmware/PARTITIONS.md) |
-| Wi-Fi | **RTL8192ER**, 2×2 802.11b/g/n, 2 internal 2 dBi antennas, vendor `rtl8192cd` driver |
+| Wi-Fi | **RTL8192EE** (`10ec:818b`, PCIe), 2×2 802.11b/g/n, 2 internal antennas; mainline `rtl8192ee` |
 | Ethernet | **one** 100 Mbit LAN jack |
 | Power | mains, wall-plug form factor, 6 W max |
 | Console | **38400 8N1** |
@@ -55,9 +60,10 @@ work, and what they got working.
    RTL819x. OpenWrt's `realtek` target is RTL838x/RTL839x **switch** silicon —
    different chips, not this.
 
-## Proposed milestones
+## Milestones
 
-Nothing past M1 should start before M0 and M1 are both done.
+All verified on hardware and committed; the write-up for each is in
+`docs/`. The descriptions below are the original plan, annotated with results.
 
 - **M0 — Back it up.** *Half done.* The boot log is captured (2026-08-31) and
   answered the flash chip — Winbond **W25Q32**, JEDEC `0xEF4016`, 4 MB single-IO
@@ -65,27 +71,30 @@ Nothing past M1 should start before M0 and M1 are both done.
   **failsafe mode** as an overlay-level recovery path. **The 4 MB dump is still
   outstanding and is now the only thing blocking everything else.**
   *(See [`../iwe3000n-firmware/README.md`](../iwe3000n-firmware/README.md).)*
-- **M1 — Map the board.** Partly answered: the LAN jack is **a VLAN on the SoC
-  switch**, not a lone PHY (`eth0 vid=9 Member port 0x10f`, `eth1 vid=8 Member
-  port 0x110`, `peth0` mapped to `eth1`). Still open: whether the loader stops on
-  a keypress and which one, the GPIO map for LEDs and the reset button, and where
-  the factory MAC lives.
+- **M1 — Map the board.** ✅ [`docs/M1-BOOT.md`](docs/M1-BOOT.md). The LAN jack
+  is **a VLAN on the SoC switch**, not a lone PHY (`eth0 vid=9 Member port
+  0x10f`, `eth1 vid=8 Member port 0x110`, `peth0` mapped to `eth1`). The loader
+  stops on a 24-ESC burst; the factory MAC lives in the H601 block at
+  `mtd0+0x6000` and is not yet wired into the driver (see `M2-ETHERNET.md`).
 - **M2 — Pick a base.** ✅ **Done: [jnilo1/rtl8196e-gateway](https://github.com/jnilo1/rtl8196e-gateway)**,
   mainline Linux 6.18. The 4 MB question that blocked this decision is answered
   — it fits, with 85 % of a 1664 KiB kernel partition used and the overlay no
   smaller than stock's. See **[`docs/PORT-PLAN.md`](docs/PORT-PLAN.md)**, which
   also explains why no bootloader replacement is needed and what the route
   costs (no Wi-Fi).
-- **M3 — RAM-boot something.** Any kernel that reaches a shell over serial
-  without touching flash. Copy the DIR-842's posture: RAM-only until proven.
-- **M4 — Ethernet, then flash write.** Not before a network path exists to
-  recover over.
-- **M5 — Wi-Fi.** Not a `rtl8192cd` forward-port after all. The radio is a
-  **RTL8192EE** (`10ec:818b`) and mainline has driven it since Linux 3.16 — the
-  missing piece is a **PCIe host controller** for the RTL819x, which neither
-  mainline nor jnilo1 has. The vendor register sequence is already in the
-  workspace and is the same code that printed `Find Port=0` on this board. See
-  **[`docs/WIFI-PLAN.md`](docs/WIFI-PLAN.md)**.
+- **M3 — RAM-boot something.** ✅ Kernel reaches a serial shell; PCIe host
+  trains to L0. [`docs/M3-PCIE.md`](docs/M3-PCIE.md).
+- **M4 — Ethernet, then flash write.** ✅ Ethernet works and the loader's TFTP
+  writes the kernel at `0x00010000`; the RTL8192EE enumerates over a
+  from-scratch PCIe host driver. [`docs/M4-RADIO.md`](docs/M4-RADIO.md).
+- **M5 — Wi-Fi.** ✅ **The radio works.** Not a `rtl8192cd` forward-port after
+  all — the radio is a **RTL8192EE** (`10ec:818b`) mainline has driven since
+  Linux 3.16, and the missing piece was a **PCIe host controller** for the
+  RTL819x, now written (`files/drivers/pci/controller/pci-rtl819x.c`). `hostapd`
+  reaches `AP-ENABLED`; a real-client test needs a phone.
+  [`docs/M5-AP.md`](docs/M5-AP.md), [`docs/WIFI-PLAN.md`](docs/WIFI-PLAN.md).
+- **M6 — Fit 4 MB.** ✅ Kernel 1784 KiB, rootfs 923 KiB, both within their
+  partitions. [`docs/M6-FLASH-BUDGET.md`](docs/M6-FLASH-BUDGET.md).
 
 ## Read also
 

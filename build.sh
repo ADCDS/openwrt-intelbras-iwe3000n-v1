@@ -235,8 +235,8 @@ open(path, "w").write("\n".join(out) + "\n")
 PY
     echo "    board dtb, CONFIG_PCI and CONFIG_PCIE_RTL819X set"
     echo
-    echo "overlay done. Note the wireless stack is NOT enabled yet — that waits"
-    echo "on the stage 1 result from pci-rtl819x.c. See docs/WIFI-PLAN.md."
+    echo "overlay done. mac80211 + rtl8192ee are built in, with their firmware"
+    echo "in CONFIG_EXTRA_FIRMWARE (the rootfs mounts too late to supply it)."
 }
 
 cmd_rootfs() {
