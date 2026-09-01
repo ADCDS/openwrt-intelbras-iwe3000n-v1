@@ -158,6 +158,53 @@ It is a host-side defect in the PCIe host controller written for this port
 its INTx forwarding enabled (or a small irqchip/demux built) so an endpoint INTA
 becomes an assertion on INTC line 14. That is mainline work, in our own code.
 
+## The RX-DMA corruption (M5's current blocker), and what it is NOT
+
+With the interrupt delivered, the radio datapath runs and **corrupts random host
+memory**: unrelated processes (`mount`, `stty`, `getty`, the shell) take SIGSEGV
+at random addresses, and `hostapd` soft-locks the CPU. rtlwifi itself logs no
+error — the driver believes everything is fine while memory is scribbled. That is
+the signature of the chip DMAing into the wrong host pages, or a wild kernel
+pointer in the RX path.
+
+Ruled out, by inspection and by test on hardware:
+
+- **Descriptor endianness** — the TX/RX descriptor setters use `cpu_to_le32` /
+  `le32p_replace_bits`; the high address dword is cleared for the 32-bit case.
+- **RX length overflow** — `len` is bounds-checked (`skb->end - skb->tail > len`)
+  before `skb_put`, and a bad length frees the skb.
+- **RX ring pointer math** — read/write pointers come from `rtl_read_dword`
+  (endian-correct MMIO), with a normal fifo-space calc.
+- **Cache coherency** — `CONFIG_DMA_NONCOHERENT=y`, `dma_default_coherent` is
+  false, so the PCIe device is non-coherent and cache-managed, exactly like the
+  (working) on-SoC ethernet. Descriptor rings are `dma_alloc_coherent`.
+- **Inbound address translation / offset** — the vendor RC bring-up sets no
+  inbound window and masks addresses to `0x1FFFFFFF` (identity over the 512 MB
+  physical space); mainline with no `dma-ranges` is the same 1:1.
+- **DMA mask** — vendor `RTL819x_DMA_MASK = 0xffffffff`; mainline sets 32-bit.
+  Full DRAM, no restriction.
+- **Max Payload Size** — already 128B on both RC and endpoint (confirmed with
+  `pci=pcie_bus_safe`, which changed nothing).
+- **Upper-16 MB addressing** — the theory that the RC only forwards the low half
+  is disproved by the fact that **the vendor firmware runs Wi-Fi on this exact
+  32 MB board.** The hardware can DMA the full 32 MB.
+
+What that leaves: a **software difference between mainline `rtl8192ee`'s DMA/RX
+path and the vendor `rtl8192cd`.** The vendor driver, written for this SoC and
+this big-endian CPU, works here; mainline — which has almost certainly never run
+big-endian — does not. Finding it needs a runtime memory-poison/bisection or a
+line-by-line DMA comparison against the vendor driver. This is real, open-ended
+work: the same "changes the project's cost" boundary, now at the DMA layer.
+
+## Board state
+
+The RX corruption makes the board unstable once the radio runs, so the board is
+currently flashed with a **wifi-inert kernel** (the DT interrupt-map left at the
+old `&intc 14`, so the PCIe IRQ never fires and the datapath never starts). It
+boots cleanly, ethernet works, no corruption. The repo keeps the real fix
+(`&intc 21` + the intc patch); rebuild from the tree to get the interrupt-live
+kernel back for continued DMA debugging.
+
 ## What to do next
 
 - **Fix the interrupt forwarding in `pci-rtl819x.c`.** The endpoint already
