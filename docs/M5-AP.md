@@ -1,10 +1,11 @@
 # M5 — hostapd AP on the RTL8192EE
 
-**Status: not complete. Three real driver bugs found and fixed; the radio still
-emits nothing, and a monitor capture pins the cause on the board's RF front end
-— antenna-switch/PA settings mainline has no profile for.** What works is
-verified on hardware; what does not is characterised down to the register level
-and confirmed off the air below. No guess here is presented as a result.
+**Status: not complete, but the root cause is now proven and it is in our own
+code, not the RF hardware. Three driver bugs are fixed; the radio emits nothing
+because the RTL8192EE's PCIe interrupt is never delivered to the CPU, so the
+interrupt-driven beacon path never runs.** An earlier version of this file blamed
+the RF front end / antenna path — that was wrong, and the section below shows the
+config-space read that disproves it. Everything is verified on hardware.
 
 ## Layer by layer, what was wrong and what is fixed
 
@@ -89,39 +90,54 @@ raw frames including bad-FCS ones, so a malformed beacon would still show — th
 silence is total. A phone sees nothing either. The PCIe interrupt count stays 0
 (`/proc/interrupts`: `14 rtl_pci`), consistent with the radio emitting nothing.
 
-## The remaining blocker: the antenna path is not driven
+## The real blocker: the PCIe interrupt is never delivered
 
-The monitor capture rules out the beacon-content / DMA theory outright — a
-malformed frame would have been captured, and nothing was. The MAC, BB and
-beacon logic are all armed (registers above), TX power is real, yet **no RF
-energy leaves the radio.**
+The monitor capture ruled out a *malformed* beacon (nothing was transmitted at
+all). The next question — is a valid beacon even being handed to the hardware? —
+has a clean answer, and it is not the antenna.
 
-The RF core itself is not dead: Tx IQK succeeds, and IQK runs through the RF
-chip's *internal* loopback. So the chip can generate a TX tone internally but it
-never reaches the antenna. That points at the board's **RF front end** — the
-antenna switch and any external PA/LNA, driven by board-specific GPIO/RFE
-settings. Mainline `rtl8192ee` configures these from a small set of known board
-profiles; it has none for the IWE 3000N (`board_type` reads `0x0` from the
-efuse), so whatever antenna-switch GPIOs this board needs are never set and TX
-is left routed into a dead internal path.
+The rtl8192ee beacon is **interrupt-driven**. mac80211's beacon is fetched and
+DMA'd to the chip by `_rtl_pci_prepare_bcn_tasklet` (in `rtlwifi/pci.c`), and
+that tasklet is scheduled from exactly one place: the PCIe interrupt handler, on
+the beacon-DMA interrupt (`pci.c` `tasklet_schedule(...irq_prepare_bcn_tasklet)`
+under `RTL_IMR_BCNINT`). No other code path schedules it. So no interrupt means
+no beacon, ever.
 
-This is exactly the M3 stop-condition, reached at M5: the RF-front-end register
-knowledge lives in the vendor `rtl8192cd` driver (which was written for this
-board and this big-endian SoC), not in mainline. Recovering it means reading the
-vendor driver's antenna-switch/RFE setup for this board and porting it — real
-work that changes the project's cost.
+And the interrupt never arrives. Read straight from config space, stable across
+repeated samples with the AP running:
 
-## What a person could do next
+```
+EP  0000:01:00.0 status (0x06) = 0x0018   bit 3 (Interrupt Status) = 1  -> INTx asserted
+EP  0000:01:00.0 command(0x04) = 0x0007   bit 10 (INTx disable) = 0     -> INTx enabled
+EP  interrupt pin (0x3d)       = 0x01     INTA; no MSI capability in use
+RC  0000:00:00.0 status (0x06) = 0x0010   bit 3 = 0                     -> not propagated up
+/proc/interrupts  "14 rtl_pci"  = 0                                     -> CPU never sees it
+```
 
-- Port the vendor antenna-switch / RFE setup. Read how `rtl8192cd` (in the
-  vendor SDK, and in `lekswrt/rtl8196e`) configures the antenna switch and any
-  external PA GPIOs for this board, and reproduce it in the mainline
-  `rtl8192ee` `_rtl92ee_phy_set_rf_on` / RFE path. This is the direct fix for the
-  dead antenna path.
-- Or take the `lekswrt/rtl8196e` fallback wholesale (working eth + 8192E at 4 MB,
-  Linux 3.10): it runs the *vendor* `rtl8192cd` driver, which already knows this
-  board's RF front end and reads H601 calibration, sidestepping both the
-  efuse-endian bug and the antenna-path gap by not being mainline rtlwifi at all.
+The endpoint is **asserting its legacy INTA continuously**, and the root complex
+is **not forwarding it** to SoC interrupt line 14 (which `bspchip.h` confirms is
+the PCIe IRQ). The line number in the devicetree is right; the RC simply never
+raises it. This also explains everything else that looked dead: RX, TX-done, C2H
+— the entire datapath past the polled `hw_init` is interrupt-driven, and none of
+it runs.
+
+This is **not** an RF or antenna problem and needs no vendor register knowledge.
+It is a host-side defect in the PCIe host controller written for this port
+(`files/drivers/pci/controller/pci-rtl819x.c`): the RTL819x root complex needs
+its INTx forwarding enabled (or a small irqchip/demux built) so an endpoint INTA
+becomes an assertion on INTC line 14. That is mainline work, in our own code.
+
+## What to do next
+
+- **Fix the interrupt forwarding in `pci-rtl819x.c`.** The endpoint already
+  asserts INTA; the RC just has to deliver it. Find the RTL819x RC interrupt
+  enable/mask register (vendor `rtl8196e` PCIe bring-up, or the datasheet) and
+  set it during probe, or register the RC as an irqchip that demuxes its
+  interrupt-status register onto the endpoint's virq. Then confirm
+  `/proc/interrupts` "14 rtl_pci" starts counting, and the beacon should follow.
+- This makes the mainline path viable again: the remaining blocker is a bounded
+  bug in code we own, not the open-ended RF/endian work the antenna theory
+  implied.
 
 ## What is done and reusable
 

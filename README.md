@@ -8,13 +8,13 @@ OpenWrt for the **Intelbras IWE 3000N v1** — RealTek **RTL8196E**, 4 MB flash,
 > The board runs jnilo1 Linux 6.18 from a kernel + squashfs rootfs flashed over
 > the loader's TFTP. Ethernet works and the RTL8192EE enumerates over a
 > from-scratch PCIe host driver; M1–M4 and M6 are verified on hardware. **M5 is
-> not complete**: three real bugs are fixed (BAR aperture, a big-endian efuse
-> misread, idle power-save), `hostapd` reaches `AP-ENABLED` and every TX-path
-> register is armed at healthy power — but a monitor-mode capture shows the radio
-> emits nothing, while IQK's internal loopback still passes. The cause is the
-> board's RF front end (antenna-switch/PA GPIOs) that mainline `rtl8192ee` has no
-> profile for. The honest write-up, with the register and capture evidence, is
-> [`docs/M5-AP.md`](docs/M5-AP.md).
+> not complete**, but the root cause is proven and it is in our own code: three
+> bugs are fixed (BAR aperture, a big-endian efuse misread, idle power-save) and
+> `hostapd` reaches `AP-ENABLED`, yet the radio emits nothing because the
+> RTL8192EE's **PCIe interrupt is never delivered** — the endpoint asserts INTA
+> (config status bit 3 = 1) but the root complex never raises SoC line 14, so the
+> interrupt-driven beacon path never runs. Host-side bug in `pci-rtl819x.c`, not
+> RF. Evidence in [`docs/M5-AP.md`](docs/M5-AP.md).
 >
 > `./build.sh kernel` and `./build.sh rootfs` build the images; recovery to
 > stock is [`../iwe3000n-firmware/RESTORE-TO-STOCK.md`](../iwe3000n-firmware/RESTORE-TO-STOCK.md).
@@ -95,10 +95,11 @@ All verified on hardware and committed; the write-up for each is in
   (`10ec:818b`) on a **PCIe host controller** written for this port
   (`files/drivers/pci/controller/pci-rtl819x.c`). Three real bugs fixed — BAR
   aperture, a big-endian efuse misread (`rtlwifi/efuse.c`), and idle power-save
-  — get it to `AP-ENABLED` with every TX register armed, but a monitor capture
-  shows nothing on the air: the board's RF front end (antenna switch / PA) is not
-  driven, and mainline has no profile for it. See [`docs/M5-AP.md`](docs/M5-AP.md)
-  and [`docs/WIFI-PLAN.md`](docs/WIFI-PLAN.md).
+  — get it to `AP-ENABLED` with every TX register armed, but the radio emits
+  nothing: the RTL8192EE asserts its PCIe INTx and the root complex never
+  forwards it (IRQ 14 stays 0), so the interrupt-driven beacon never fires. The
+  fix is host-side interrupt forwarding in `pci-rtl819x.c`, not RF. See
+  [`docs/M5-AP.md`](docs/M5-AP.md) and [`docs/WIFI-PLAN.md`](docs/WIFI-PLAN.md).
 - **M6 — Fit 4 MB.** ✅ Kernel 1784 KiB, rootfs 923 KiB, both within their
   partitions. [`docs/M6-FLASH-BUDGET.md`](docs/M6-FLASH-BUDGET.md).
 
