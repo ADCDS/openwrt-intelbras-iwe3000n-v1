@@ -106,6 +106,10 @@ PY
     install -Dm644 "$HERE/patches/rtlwifi-efuse-big-endian-eeprom-id.patch" \
                    "$KDIR/patches-6.18/rtlwifi-efuse-big-endian-eeprom-id.patch"
 
+    echo "==> rtlwifi RX refill-before-release race fix"
+    install -Dm644 "$HERE/patches/rtlwifi-rx-refill-before-hw-release.patch" \
+                   "$KDIR/patches-6.18/rtlwifi-rx-refill-before-hw-release.patch"
+
     echo "==> [3b'\''] rtl819x intc must route the PCIe interrupt"
     # jnilo1's intc ships IRR2=0 (no PCIe); without routing GIMR bit 21 to a CPU
     # IP line the RTL8192EE's INTA never reaches the CPU and the radio is silent.

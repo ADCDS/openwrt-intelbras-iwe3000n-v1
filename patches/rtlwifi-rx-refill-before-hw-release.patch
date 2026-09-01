@@ -1,0 +1,45 @@
+rtlwifi: rtl_pci: refill the RX slot before releasing it to hardware
+
+In the new_trx_flow RX path, _rtl_pci_rx_interrupt() advances the hardware read
+pointer (rtl_write_word to 0x3B4 in new_trx_end) BEFORE it refills the just-freed
+buffer descriptor with a new skb (_rtl_pci_init_one_rxdesc under no_new). Between
+those two points the descriptor still holds the DMA address of the skb that was
+just handed up to mac80211, but the hardware has already been told the slot is
+free -- so it may DMA an incoming frame straight into that in-flight skb.
+
+On a fast little-endian host the window is a few instructions and effectively
+never loses the race; on this 400 MHz big-endian RTL8196E under sustained RX
+(AP mode) it loses it constantly, silently corrupting whatever the skb's memory
+is reused for -- presenting as random SIGSEGVs in unrelated processes with no
+driver-level error, and as a 100%-softirq lockup once the corruption spreads.
+
+Move the 0x3B4 write to after the refill so the slot is only released to the
+hardware once it points at a fresh buffer.
+
+--- a/drivers/net/wireless/realtek/rtlwifi/pci.c
++++ b/drivers/net/wireless/realtek/rtlwifi/pci.c
+@@ -795,8 +795,6 @@
+ 					RTL_PCI_MAX_RX_COUNT;
+ 
+ 			rx_remained_cnt--;
+-			rtl_write_word(rtlpriv, 0x3B4,
+-				       rtlpci->rx_ring[hw_queue].next_rx_rp);
+ 		}
+ 		if (((rtlpriv->link_info.num_rx_inperiod +
+ 		      rtlpriv->link_info.num_tx_inperiod) > 8) ||
+@@ -811,6 +809,15 @@
+ 				if (new_skb)
+ 					dev_kfree_skb_any(skb);
+ 			}
++			/* Release the slot to the hardware only AFTER it has been
++			 * refilled with a fresh buffer. Upstream writes 0x3B4 in
++			 * new_trx_end, before this refill; that opens a window in
++			 * which the chip may DMA into the not-yet-refilled slot --
++			 * which still points at the skb already handed to
++			 * mac80211 -- and on a slow CPU under sustained RX it does,
++			 * silently scribbling that buffer. */
++			rtl_write_word(rtlpriv, 0x3B4,
++				       rtlpci->rx_ring[hw_queue].next_rx_rp);
+ 		} else {
+ 			if (!_rtl_pci_init_one_rxdesc(hw, skb, (u8 *)pdesc,
+ 						      rxring_idx,

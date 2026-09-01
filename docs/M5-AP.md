@@ -231,7 +231,7 @@ upstream rtlwifi big-endian expertise, or a differential trace against the vendo
 `rtl8192cd` -- the same "changes the project's cost" boundary, now at the last
 layer. The efuse and interrupt fixes stand regardless.
 
-## Board state
+## Board state (historical — superseded by "Board state (current)" below)
 
 The RX corruption makes the board unstable once the radio runs, so the board is
 currently flashed with a **wifi-inert kernel** (the DT interrupt-map left at the
@@ -240,7 +240,7 @@ boots cleanly, ethernet works, no corruption. The repo keeps the real fix
 (`&intc 21` + the intc patch); rebuild from the tree to get the interrupt-live
 kernel back for continued DMA debugging.
 
-## What to do next
+## What to do next (historical — done; superseded by the section at the end)
 
 - **Fix the interrupt forwarding in `pci-rtl819x.c`.** The endpoint already
   asserts INTA; the RC just has to deliver it. Find the RTL819x RC interrupt
@@ -261,3 +261,96 @@ kernel back for continued DMA debugging.
 - `files/rootfs/etc/hostapd.conf` — 2.4 GHz WPA2-PSK, channel 6.
 - The efuse patch and `ips=0` are correct and stay in the tree regardless of the
   RF outcome — any working radio on this board needs them.
+
+## Update: the corruption had a concrete root cause — an RX refill race (FIXED)
+
+The "softirq livelock scribbles memory" framing above was the *symptom*, not the
+cause, and the section before this one should be read with that in mind. The
+actual bug is a plain ordering error in `_rtl_pci_rx_interrupt()`, and it is now
+fixed by `patches/rtlwifi-rx-refill-before-hw-release.patch`.
+
+In the `use_new_trx_flow` RX path, upstream advances the hardware read pointer
+(`rtl_write_word(rtlpriv, 0x3B4, next_rx_rp)`, in `new_trx_end`) **before** it
+refills the just-freed buffer descriptor with a fresh skb
+(`_rtl_pci_init_one_rxdesc()`, under `no_new`). Between those two points the
+descriptor still holds the DMA address of the skb that was *already handed up to
+mac80211*, but the hardware has been told the slot is free — so it can DMA an
+incoming frame straight into that in-flight skb.
+
+On a fast little-endian host that window is a few instructions and effectively
+never loses. On this 400 MHz big-endian RTL8196E under sustained AP-mode RX it
+loses constantly, silently scribbling whatever the skb's memory is reused for.
+That is exactly the observed signature: random SIGSEGVs in *unrelated* processes,
+at random addresses, with no driver-level error — and no corruption at all on a
+kernel where the ISR never runs.
+
+The fix moves the `0x3B4` write to after the refill, so the slot is released to
+the hardware only once it points at a fresh buffer.
+
+**How it was measured.** Before the fix, hostapd reliably produced SIGSEGVs in
+unrelated processes within 4–35 s of the radio coming up. After the fix, a
+40-second sustained hostapd run completed with **0 SIGSEGVs and 0 soft lockups**
+(liveness counter reached `ALIVE_289`) — an outcome never once observed before
+the fix. Note the earlier segfault timings in this document were partly read off
+*replayed* uart-ota ring-buffer history rather than live output; the bridge
+replays its buffer on connect, which cost real debugging time. Check timestamps
+against the current boot before trusting them.
+
+One nit, deliberate: on the rare `goto no_new` path (an `skb` allocation
+failure) `next_rx_rp` has not been advanced, so the relocated write stores the
+value already in the register. That write is inert, and leaving it unguarded
+keeps the patch minimal.
+
+## Update: the PCIe link is intermittent, and a wedged endpoint needs cold power
+
+Separately from the RX bug, the PCIe link does not always train. When it fails it
+sits at `LTSSM = 0x04` (Polling) and never reaches L0 (`0x11`), so the RTL8192EE
+is never enumerated and `wlan0` is absent. When it does train, everything above
+works.
+
+The important, hard-won result: **once the endpoint is in this state, no
+SoC-side register sequence recovers it — only physically removing power.**
+Measured on hardware, all failing identically at `LTSSM = 0x04` across repeated
+warm reboots:
+
+- a real PERST pulse (clear bit 26, hold, set) rather than the plain set, so the
+  endpoint actually sees a reset edge;
+- retrying the whole power-on + train sequence up to 4×;
+- gating the entire PCIe block down first — `ACTIVE_PCIE0` + the 8196E clock bits
+  + `PERST` all cleared together, held, then brought back up, so the endpoint's
+  reference clock genuinely stops (the closest a warm boot gets to a cold POR);
+- the **unmodified baseline driver**, which historically *does* train on some
+  cold boots, failing identically on the same wedged endpoint.
+
+That last one is the control that matters: the baseline failing the same way
+proves the wedge is endpoint state, not a regression in the bring-up code. So
+none of the three mitigations above were merged — none of them was ever observed
+to train the link, because they could only be tested against an already-wedged
+endpoint. They are recorded here rather than shipped. UNVERIFIED whether any of
+them improves cold-boot training; that needs a board on cold power to test.
+
+Practical consequence: **if `wlan0` is missing, power-cycle the board** (remove
+power, don't `reboot`). A warm reboot cannot clear it.
+
+## Board state (current)
+
+The board runs the tree as committed: baseline `pci-rtl819x.c` plus the RX
+refill fix. It boots cleanly, `eth0` is up, and it is recoverable via the
+loader's TFTP at the kernel burn address `0x00010000`. `mtd0` untouched.
+
+The endpoint is currently wedged from the debugging session, so `wlan0` is absent
+until the board is cold power-cycled.
+
+## What to do next
+
+- **Cold power-cycle the board**, then confirm `LTSSM 0x11` / `wlan0` present.
+- Re-run hostapd and confirm the corruption stays gone over a long run, then
+  finish M5 properly: a **real client associating and passing traffic**. That is
+  the one M5 criterion still unmet — it has never been demonstrated.
+- A **softirq livelock** under sustained RX was seen separately from the
+  corruption (100% softirq in `handle_softirqs`). It is not explained by the
+  refill race and may still be present; mac80211's RX tasklet has no budget,
+  which is a known hazard on a CPU this slow. Re-test after the fix before
+  chasing it.
+- If the link proves flaky from cold too, the three mitigations above are the
+  place to start — but measure each against a *cold* boot, not a warm one.
