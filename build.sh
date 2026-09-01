@@ -106,6 +106,24 @@ PY
     install -Dm644 "$HERE/patches/rtlwifi-efuse-big-endian-eeprom-id.patch" \
                    "$KDIR/patches-6.18/rtlwifi-efuse-big-endian-eeprom-id.patch"
 
+    echo "==> [3b'\''] rtl819x intc must route the PCIe interrupt"
+    # jnilo1's intc ships IRR2=0 (no PCIe); without routing GIMR bit 21 to a CPU
+    # IP line the RTL8192EE's INTA never reaches the CPU and the radio is silent.
+    #
+    # irq-rtl819x.c is a jnilo1 *overlay* file (files-6.18/), copied into the
+    # tree AFTER patches-6.18/ is applied -- so a patches-6.18/ patch can't touch
+    # it (the file is not there yet at patch time). Patch the overlay copy in
+    # place instead, idempotently, and abort loudly if it no longer applies
+    # clean (jnilo1 changed the file -> refresh patches/irqchip-rtl819x-route-pcie.patch).
+    local intc="$f/drivers/irqchip/irq-rtl819x.c"
+    if grep -q REALTEK_HW_PCIE_BIT "$intc"; then
+        echo "    already applied"
+    else
+        patch -p1 -f --no-backup-if-mismatch -d "$f" \
+              < "$HERE/patches/irqchip-rtl819x-route-pcie.patch" \
+            || { echo "ERROR: irqchip-rtl819x-route-pcie.patch failed on files-6.18" >&2; exit 1; }
+    fi
+
     echo "==> [3c] SOC_RTL8196E must select HAVE_PCI + PCI_DRIVERS_GENERIC"
     # Upstream selects HW_HAS_PCI, which no longer gates anything: in 6.18
     # drivers/pci/Kconfig has "menuconfig PCI ... depends on HAVE_PCI". Without

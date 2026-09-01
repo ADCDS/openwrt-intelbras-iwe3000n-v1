@@ -1,0 +1,85 @@
+irqchip: rtl819x: route the PCIe interrupt (GIMR bit 21) to a CPU IP line
+
+The jnilo1 rtl8196e-gateway target has no PCIe, so this intc driver ships with
+IRR2 = 0 ("no PCIe") and never routes the PCIe source. On a board that does have
+the on-chip RTL8192EE reachable over pci-rtl819x, the endpoint asserts its legacy
+INTA continuously (config status bit 3 = 1) but the CPU never sees it: the PCIe
+source is GIMR/GISR bit 21, its IRR2 route-select field [23:20] is 0 (unrouted),
+so no IP line is ever asserted. With the interrupt-driven beacon/RX/TX-done path
+dead, the radio enumerates and hw_init succeeds (both polled) yet nothing reaches
+the air.
+
+Route GIMR bit 21 to IP3 -- the line ethernet already uses and one of the three
+this intc is chained to (interrupts = <2>,<3>,<4>). The GIMR enable bit is set
+dynamically by the generic unmask when the wifi driver requests the IRQ, so this
+static routing is inert on boards that never request it. Board DTs reach this
+line with "interrupts = <21>" (the GIMR bit), matching how ethernet uses <15>.
+
+Also cache the PCIe virq in the handler fast-path, as ethernet and the UARTs do.
+
+--- a/drivers/irqchip/irq-rtl819x.c
++++ b/drivers/irqchip/irq-rtl819x.c
+@@ -67,6 +67,7 @@
+ #define REALTEK_HW_UART0_BIT        12      /* UART 0 */
+ #define REALTEK_HW_UART1_BIT        13      /* UART 1 */
+ #define REALTEK_HW_SW_CORE_BIT      15      /* Switch Core (Ethernet) */
++#define REALTEK_HW_PCIE_BIT         21      /* PCIe host (RTL8192EE etc.) */
+ 
+ /*
+  * MIPS CPU Interrupt Lines (IP0-IP7) — for documentation only.
+@@ -88,6 +89,7 @@
+ static unsigned int uart0_virq;
+ static unsigned int uart1_virq;
+ static unsigned int switch_virq;
++static unsigned int pcie_virq;
+ 
+ /* ========================================================================== */
+ /* Interrupt Routing Configuration */
+@@ -127,8 +129,16 @@
+ 
+ 	ic_w32(irr1_val, REALTEK_IC_REG_IRR1);
+ 
+-	/* IRR2: All peripherals disabled (no PCIe) */
+-	irr2_val = 0x00000000;
++	/*
++	 * IRR2 covers GIMR bits 16-23, one 4-bit route-select field each. The
++	 * PCIe source is GIMR bit 21, whose field is [23:20]; route it to CPU
++	 * IP3 (0x3), one of the lines this intc is chained to (interrupts =
++	 * <2>,<3>,<4>) and the same line ethernet uses. Boards without a PCIe
++	 * host never unmask GIMR bit 21, so this routing is inert for them; a
++	 * board that does (e.g. the RTL8192EE Wi-Fi via pci-rtl819x) needs it,
++	 * or the endpoint asserts INTA with nothing on the CPU side listening.
++	 */
++	irr2_val = (0x3 << 20);  /* PCIe (GIMR bit 21) -> IP3 */
+ 	ic_w32(irr2_val, REALTEK_IC_REG_IRR2);
+ 
+ 	/* IRR0 and IRR3: Not used */
+@@ -268,6 +278,9 @@
+ 		case REALTEK_HW_UART0_BIT:
+ 			virq = uart0_virq;
+ 			break;
++		case REALTEK_HW_PCIE_BIT:
++			virq = pcie_virq;
++			break;
+ 		default:
+ 			virq = irq_find_mapping(domain, bit);
+ 			break;
+@@ -313,6 +326,10 @@
+ 		uart1_virq = irq;
+ 		pr_debug("RTL8196E INTC: UART1 (bit %lu) → virq %u\n", hw, irq);
+ 		break;
++	case REALTEK_HW_PCIE_BIT:
++		pcie_virq = irq;
++		pr_debug("RTL8196E INTC: PCIe (bit %lu) → virq %u\n", hw, irq);
++		break;
+ 	default:
+ 		pr_debug("RTL8196E INTC: HW bit %lu → virq %u\n", hw, irq);
+ 		break;
+@@ -329,6 +346,7 @@
+ 	if (irq == switch_virq) switch_virq = 0;
+ 	else if (irq == uart0_virq) uart0_virq = 0;
+ 	else if (irq == uart1_virq) uart1_virq = 0;
++	else if (irq == pcie_virq) pcie_virq = 0;
+ }
+ 
+ /* IRQ domain operations */

@@ -205,7 +205,20 @@
 
 			#interrupt-cells = <1>;
 			interrupt-map-mask = <0 0 0 0>;
-			interrupt-map = <0 0 0 0 &intc 14>;
+			/*
+			 * The RTL8192EE's single INTA maps to the SoC intc at the
+			 * PCIe GIMR/GISR bit, which is 21 -- NOT 14. 14 is the
+			 * vendor's flat Linux-irq number for PCIe (bspchip.h
+			 * BSP_PCIE_IRQ); the mainline realtek,rtl819x-intc uses the
+			 * GIMR bit as its hwirq (ethernet is bit 15 = "interrupts =
+			 * <15>"), and BSP_PCIE_IE is (1 << 21). Routing it to 14
+			 * unmasked the wrong GIMR bit, so the endpoint asserted INTA
+			 * forever (config status bit 3) while the CPU never saw it
+			 * and the interrupt-driven beacon path never ran. The intc
+			 * also has to route bit 21 to a CPU IP line; see the
+			 * irq-rtl819x IRR2 patch.
+			 */
+			interrupt-map = <0 0 0 0 &intc 21>;
 
 			status = "okay";
 		};

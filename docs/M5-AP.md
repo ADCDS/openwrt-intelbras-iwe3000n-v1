@@ -1,11 +1,42 @@
 # M5 — hostapd AP on the RTL8192EE
 
-**Status: not complete, but the root cause is now proven and it is in our own
-code, not the RF hardware. Three driver bugs are fixed; the radio emits nothing
-because the RTL8192EE's PCIe interrupt is never delivered to the CPU, so the
-interrupt-driven beacon path never runs.** An earlier version of this file blamed
-the RF front end / antenna path — that was wrong, and the section below shows the
-config-space read that disproves it. Everything is verified on hardware.
+**Status: not complete. The interrupt-delivery root cause is now fixed and
+verified (the PCIe IRQ was never reaching the CPU); enabling it exposes the next
+layer — the RX DMA corrupts host memory, so the board is unstable once the radio
+datapath runs.** An earlier version of this file blamed the RF front end /
+antenna path — that was wrong. Everything below is verified on hardware.
+
+## Update: PCIe interrupt delivery fixed (verified), and what it exposed
+
+The interrupt was never delivered because of two intc/DT faults, both now fixed:
+
+- **Wrong hwirq.** The DT mapped the RTL8192EE's INTA to `&intc 14` — the
+  *vendor's flat Linux-irq number* (bspchip.h `BSP_PCIE_IRQ`). The mainline
+  `realtek,rtl819x-intc` uses the **GIMR bit** as its hwirq, and PCIe is
+  `BSP_PCIE_IE = (1 << 21)`. Ethernet proves the scheme: `interrupts = <15>` =
+  bit 15 = switch core. Fixed: `&intc 21`.
+- **No routing.** jnilo1's intc ships `IRR2 = 0` ("no PCIe"), so the PCIe source
+  (GIMR bit 21, IRR2 field [23:20]) was routed to no CPU IP line. Fixed by
+  `patches/irqchip-rtl819x-route-pcie.patch`: route it to IP3 (the line ethernet
+  uses; the intc is chained to IP2/3/4). The GIMR enable is set dynamically by
+  the generic unmask when the wifi driver requests the IRQ, so the routing is
+  inert on boards with no PCIe.
+
+Verified on hardware: `/proc/interrupts` now shows `21 rtl_pci` (was `14`, and
+never counted); the count climbs 0 → 10 the moment `wlan0` comes up, and reaches
+the hundreds at boot. The endpoint's INTA is finally serviced.
+
+**What it exposes.** With the datapath live, the board becomes unstable: busybox
+takes `SIGSEGV` (`do_page_fault ... invalid read access from 00031880`, a
+userspace address) and bringing up the radio can hang the console entirely
+(watchdog then resets it). The interrupt rate is moderate (~hundreds over a boot,
+not a storm), so this is not the intc handler failing to quiesce — it is the
+**RX DMA writing into the wrong host memory.** The chip masters RX packets into
+host DRAM via the ring descriptors; a wrong target address there scribbles over
+whatever else lives at that physical page. This has the same shape as the efuse
+bug — a mainline rtlwifi path that has never run on a big-endian host — and is
+the next thing to find. It is a driver/DMA defect, still host-side and
+mainline-fixable, not RF.
 
 ## Layer by layer, what was wrong and what is fixed
 
