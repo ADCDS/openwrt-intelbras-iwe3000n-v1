@@ -1,103 +1,97 @@
-# M3 — PCIe host reaching L0
+# M3 — PCIe host reaches L0
 
-**Status: not achieved. Characterised, reproducible, and the remaining work is
-now known rather than guessed.**
-
-## What the board does
+**Status: achieved on hardware 2026-09-01.**
 
 ```
-[    1.823840] rtl819x-pcie 18b00000.pcie: link training failed, LTSSM = 0x00
-[    1.846760] rtl819x-pcie 18b00000.pcie: LTSSM reads 0 -- the PHY is not running, not merely unlinked
-[    1.876920] rtl819x-pcie 18b00000.pcie: probe with driver rtl819x-pcie failed with error -145
+LTSSM = 0x039DF411     (& 0x1f) == 0x11  -> L0
+CFG   = 0x818B10EC     -> 10ec:818b, the RTL8192EE
 ```
 
-The driver loads, runs and reports cleanly. The plumbing is right; the hardware
-is not coming up.
+Read live from the running board. `0x818B10EC` at `0x18b10000` is the goal's M3
+criterion: the RTL8192EE reachable from code that is not Realtek's.
 
-## What was measured, live, with devmem on the running board
+## The sequence that works
 
-The board has `/sbin/devmem`, so the sequence was tested directly rather than
-through build-and-flash cycles.
+Verified step by step with `devmem` on the running board rather than through
+build-and-flash cycles.
 
-**The system controller works. The PCIe block does not exist as far as the CPU
-is concerned:**
+```sh
+# 1. Turn the PCIe IP on. Nothing else has any effect until this is done.
+#    bit14 = active_pcie0; bits 12,13,18 are RTL8196E-specific.
+CLK_MANAGE=0x18000010          # |= (1<<14)|(1<<12)|(1<<13)|(1<<18)  = 0x00047000
+# 2. PERST, in the same register -- bit 26, NOT a GPIO.
+#                                 |= (1<<26)                          = 0x04000000
+# 3. MDIO reset, at syscon 0x50 (NOT 0x3c).
+0x18000050 = 0x8, then 0x9, then 0xB
+# 4. Program the PHY: 16 MDIO writes, 40 MHz variant.
+#    word = ((reg & 0x1f) << 8) | ((val & 0xffff) << 16) | 1, written to 0x18b01000
+0x00=0xD087 0x01=0x0003 0x02=0x4d18 0x05=0x0BCB 0x06=0xF148 0x07=0x31ff
+0x08=0x18d5 0x09=0x539c 0x0a=0x20eb 0x0d=0x1766 0x0b=0x0711 0x0f=0x0a00
+0x19=0xFCE0 0x1a=0x7e4f 0x1b=0xFC01 0x1e=0xC280
+# 5. PHY out of reset.
+0x18b01008 = 0x1, then 0x81
+# 6. Poll 0x18b00728 for (x & 0x1f) == 0x11.
+```
 
-| address | reads | |
+40 MHz is the right variant because the stock firmware's own boot log says so:
+`[   16.800000] 98 - 40MHz Clock Source`.
+
+## Why it took so long: the source was in the wrong place
+
+Everything up to this point was read out of `8192cd_host.c`, the **wireless
+driver**, because that is where Realtek does PCIe bring-up on other SoCs — and
+it is what printed this board's stock `Find Port=0 Device:Vender ID=818b10ec`.
+
+For the RTL8196E the host bring-up is in the **kernel**, at
+`arch/rlx/soc-rtl8196e/pci.c` in `lekswrt/rtl8196e`. Three registers differ, and
+all three matter:
+
+| | what the wifi-driver branches use | what the RTL8196E actually uses |
 |---|---|---|
-| `0x18000000` | `0x8196E001` | SoC ID — devmem works, and this *is* an RTL8196E |
-| `0x18002000` | `0x30000000` | UART0, live |
-| `0x18003500` | `0xFFFFFFDF` | GPIO, live |
-| `0x18000010` | `0x01000F08` | our clock + PHY-reset writes **took** |
-| `0x1800003c` | `0x0000000F` | our MDIO-reset writes **took** |
-| `0x18000044` | `0x00000009` | PCIe PLL enable **took** |
-| `0x18b00000` | `0x00000000` | PCIe root complex |
-| `0x18b01008` | `0x00000000` | PHY control — **writes vanish**, `0x81` reads back `0x00` |
-| `0x18b00728` | `0x00000000` | LTSSM |
-| `0x18b10000` | `0x00000000` | device config space |
-| `0x18f00000` | `0x00000000` | **an address that decodes nothing reads the same** |
+| PCIe IP enable | *absent* | `CLK_MANAGE \|= (1<<14)` + `(1<<12)\|(1<<13)\|(1<<18)` |
+| PERST | GPIO `0x18003500/08/0c` | `CLK_MANAGE \|= (1<<26)` |
+| MDIO reset | `0x1800003c` | `0x18000050` |
 
-That last row matters: on this SoC an undecoded read returns 0 rather than
-faulting, so "reads 0" and "not present" are indistinguishable. The PCIe block
-is either unpowered or not yet decoding.
+The first is the one that mattered. Its comment is *"first, Turn On PCIE IP"*.
+Without bit 14 the entire block is undecoded — and on this SoC an undecoded read
+returns `0`, identical to a register that exists and holds zero, so there was no
+signal distinguishing "wrong address" from "held in reset" from "not powered".
+The moment bit 14 was set, `0x18b01008` read back `0x81` instead of `0x00`.
 
-The **complete** vendor sequence was executed live, in order, with 1 s between
-steps — PLL `0x18000044=0x9`, clock `0x18000010|=0x500`, MDIO reset
-`0x1800003c=0x1` then `0x3`, PHY `0x18b01008=0x1` then `0x81`, crystal
-`0x18b01000=0xcc011901`, PHY-reset bit `0x18000010|=0x01000000`. Every
-system-controller write read back correctly. **Every PCIe-block write was lost
-and every read returned zero.**
+## Corrections to earlier notes in this repo
 
-## The addresses are right
+- **`0xcc011901` is not a "crystal write".** `0x18b01000` is the MDIO *command*
+  register: `((reg & 0x1f) << 8) | (val << 16) | 1`. So that value is an MDIO
+  write of `0xcc01` to PHY register `0x19`. The previous `UNVERIFIED` note in
+  `pci-rtl819x.c` describing it as an external-crystal setting was wrong.
+- **Reading `0` from `0x18b01000` never meant anything.** An MDIO command
+  register is write-triggered; read-back of zero is expected behaviour.
+- **The addresses were always right.** An earlier theory held that `0x18b0xxxx`
+  came from a branch guarded for other SoCs, since `rtl8196b_pci_reset` is
+  excluded for `CONFIG_RTL_8196E`. Disproving that is what led to the kernel
+  source: `lekswrt`'s `rtl8196e` target uses the identical addresses.
 
-An early theory was that `0x18b0xxxx` came from a vendor branch guarded for
-other SoCs (`rtl8196b_pci_reset` is explicitly excluded for `CONFIG_RTL_8196E`).
-That theory is **wrong**, and checking it is what produced the real answer.
+## What was tried and failed, in order
 
-`lekswrt/rtl8196e` — an OpenWrt tree with an actual `rtl8196e` target — carries
-`target/linux/realtek/files/drivers/net/wireless/rtl8192cd/8192cd_host.c` using
-**the same addresses**: `0xb8000044`, `0xb8000010`, `0xb800003C`, `0xb8b01008`,
-`0xb8b01000`. So the register map applies to this SoC.
+1. PHY reset alone, no clock, no delays — LTSSM 0x00.
+2. Plus clock `0x500` and MDIO reset at `0x3c`, 10 ms settles — LTSSM 0x00.
+3. Plus the PCIe PLL `0x18000044 = 0x9` — LTSSM 0x00.
+4. Plus `0x18b01000 = 0xcc011901` — LTSSM 0x00.
+5. Plus a 40 MHz PHY table from the `ePHY[]` array in the wifi driver — LTSSM 0x00.
+6. Plus PERST via GPIO `0x18003500/08/0c` and pinmux — LTSSM 0x00.
+7. PERST via `CLK_MANAGE` bit 26 — LTSSM 0x00, but correct.
+8. **Plus `CLK_MANAGE` bits 14/12/13/18** — block decodes, PHY reads back.
+9. **Plus the 16-entry RTL8196E MDIO table** — **LTSSM 0x11, CFG 0x818B10EC.**
 
-## What is actually missing
+Steps 1-6 were all reading the wrong SoC's code. Step 8 is the one that counts.
 
-The same file contains what the reset sequence alone does not:
+Also failed, and still open as a loose end: extracting the stock `rtl8192cd.ko`
+from our own dump to read the board's addresses directly. `unsquashfs` 4.6.1
+dies with `xz uncompress failed with error code 7` on the vendor's filter — 17
+of 911 inodes recovered. A squashfs build with the MIPS BCJ filter would do it.
 
-- **`PCIE_PHY_MDIO_Write(portnum, regaddr, val)`** (line 1877) — an MDIO
-  controller for the PCIe PHY.
-- **41 PHY register writes** in `{port, reg, value}` tables:
-  `{0, 8, 0x18d7}, {0, 9, 0x530c}, {0, 0xa, 0x00e8}, {0, 0xb, 0x0511},
-  {0, 0xc, 0x0828}, {0, 0xd, 0x17a6}, {0, 0xe, 0x98c5}, {0, 0xf, 0x0f0f},
-  {0, 0x10, 0x000c}, {0, 0x11, 0x3c00}, …`
-- The RTL8196E target config selects `CONFIG_RTL_PCIE_SIMPLE_INIT=y`,
-  `CONFIG_AUTO_PCIE_PHY_SCAN=y`, `CONFIG_USE_PCIE_SLOT_0=y` — a specific init
-  path, not the generic one.
+## Next
 
-**So M3 is not "release a reset bit". It is: implement an MDIO controller for
-the PCIe PHY, drive a 41-entry initialisation table through it, and only then
-does the register block become readable.** The knowledge exists; the scope is a
-sub-project, not a patch.
-
-## What was tried and failed
-
-- **Reset-only sequence** (two writes to `0x18b01008`, no delays, no clock):
-  LTSSM 0x00. This was the first attempt and it was wrong in three ways at once.
-- **Adding the clock and MDIO reset** with 10 ms settles: LTSSM 0x00.
-- **Adding the PCIe PLL** (`0x18000044 = 0x9`, missed initially): LTSSM 0x00.
-- **Adding the external-crystal write** (`0x18b01000 = 0xcc011901`): LTSSM 0x00.
-- **Extracting the stock `rtl8192cd.ko`** from our own flash dump to read this
-  board's real addresses: `unsquashfs` 4.6.1 fails with `xz uncompress failed
-  with error code 7` on most files — the vendor used an XZ filter it cannot
-  handle. Only 17 of 911 inodes came out, and the module was not among them.
-  Worth retrying with a squashfs build that has the MIPS BCJ filter.
-
-## Where this leaves the project
-
-M4–M6 all sit behind M3, so the radio half of the goal is behind a piece of work
-that is larger than it looked when the route was chosen. Nothing about M1 or M2
-is affected — ethernet is measured and working.
-
-The fallback stated in `FEASIBILITY.md` is unchanged and is now more attractive:
-**`lekswrt/rtl8196e` already has this PHY init working**, along with the
-`rtl8192cd` driver, on Linux 3.10.49 at 4 MB. Its `8192cd_host.c` is the very
-file quoted above. Trading a modern kernel for a working radio is a real option,
-and the same tree is where the MDIO sequence would be ported *from* either way.
+This is proven with `devmem`, not yet in the driver. `pci-rtl819x.c` needs the
+sequence above plus stage 2 (config accessors, resource windows, host bridge
+registration) before Linux enumerates the device and M4 can start.
