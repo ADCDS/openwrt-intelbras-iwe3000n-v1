@@ -158,6 +158,23 @@ want = {
     "CONFIG_%s" % sym: "CONFIG_%s=y" % sym,
     "CONFIG_PCI": "CONFIG_PCI=y",
     "CONFIG_PCIE_RTL819X": "CONFIG_PCIE_RTL819X=y",
+    # Wireless. Built in, not modules: upstream has CONFIG_MODULES unset and
+    # their build has no modules_install, so =m would silently produce nothing.
+    # The firmware blob is loaded from /lib/firmware in the rootfs.
+    "CONFIG_WIRELESS": "CONFIG_WIRELESS=y",
+    "CONFIG_CFG80211": "CONFIG_CFG80211=y",
+    "CONFIG_MAC80211": "CONFIG_MAC80211=y",
+    "CONFIG_WLAN": "CONFIG_WLAN=y",
+    "CONFIG_WLAN_VENDOR_REALTEK": "CONFIG_WLAN_VENDOR_REALTEK=y",
+    "CONFIG_RTL_CARDS": "CONFIG_RTL_CARDS=y",
+    "CONFIG_RTL8192EE": "CONFIG_RTL8192EE=y",
+    "CONFIG_FW_LOADER": "CONFIG_FW_LOADER=y",
+    # zboot places the compressed image immediately after the decompressed one
+    # when this is 0x0 (auto). With the wireless stack the kernel decompresses
+    # to ~7 MB and the auto address landed at 0x806e0000 -- no margin -- and the
+    # board jumped to it and went silent, decompressor overwriting its own
+    # source. Pin it well clear: 16 MB into a 32 MB part, leaving ~14 MB above.
+    "CONFIG_ZBOOT_LOAD_ADDRESS": "CONFIG_ZBOOT_LOAD_ADDRESS=0x81000000",
 }
 out, seen = [], set()
 for line in s:
@@ -196,6 +213,16 @@ cmd_rootfs() {
         fi
     done
 
+    echo "==> firmware blobs"
+    # rtl8192ee asks the firmware loader for this by name at probe. It is not
+    # built into the kernel (EXTRA_FIRMWARE would put it in the 1984 KiB kernel
+    # partition instead of the roomier rootfs), so it lives here.
+    if [ -f "$HERE/files/rootfs/lib/firmware/rtlwifi/rtl8192eefw.bin" ]; then
+        install -Dm644 "$HERE/files/rootfs/lib/firmware/rtlwifi/rtl8192eefw.bin" \
+                       "$sk/lib/firmware/rtlwifi/rtl8192eefw.bin"
+        echo "    rtlwifi/rtl8192eefw.bin ($(stat -c %s "$HERE/files/rootfs/lib/firmware/rtlwifi/rtl8192eefw.bin") bytes)"
+    fi
+
     docker image inspect "$IMG" >/dev/null 2>&1 || die "no $IMG image; run ./build.sh deps"
     docker run --rm -v "$UP:/workspace" \
         -w /workspace/3-Main-SoC-Realtek-RTL8196E/33-Rootfs \
@@ -204,9 +231,32 @@ cmd_rootfs() {
 
 cmd_kernel() {
     cmd_overlay
+
+    # Upstream only copies config-6.18-realtek.txt when .config is absent
+    # ("if [ ! -f .config ]"). A surviving build tree therefore keeps a stale
+    # .config and silently ignores every change to the fragment -- which once
+    # produced a "successful" build with the entire wireless stack missing and
+    # a kernel only 4 KiB larger. Drop it so the fragment always applies;
+    # object files are kept, so this is not a full rebuild.
+    rm -f "$KDIR/linux-6.18-rtl8196e/.config"
     docker image inspect "$IMG" >/dev/null 2>&1 || die "no $IMG image; run ./build.sh deps"
+    #
+    # IMEM_POLICY_DISABLE: upstream places hot-path functions in the SoC's
+    # on-chip instruction RAM against a fixed 15872-byte window. Adding the
+    # wireless stack pushes the linked-order estimate to 15900 and the build
+    # stops ("linked-order estimate 15900 exceeds 15872 bytes"). Their
+    # documented escape hatch drops the optimisation; it needs a clean tree.
+    #
+    # This is a performance trade, not a correctness one, and it invalidates
+    # the M2 throughput figures -- re-measure after any build that sets it.
+    # The alternative is trimming scripts/imem/policies/6.18.45.tsv by ~28
+    # bytes of functions, which keeps the optimisation and is the better fix
+    # once the radio works.
+    local imem="${IMEM_POLICY_DISABLE:-1}"
+    [ "$imem" = "1" ] && rm -rf "$KDIR/linux-6.18-rtl8196e"
+
     docker run --rm -v "$UP:/workspace" -w /workspace/3-Main-SoC-Realtek-RTL8196E/32-Kernel \
-        "$IMG" bash -c "BOARD=iwe3000n ./build_kernel.sh"
+        "$IMG" bash -c "IMEM_POLICY_DISABLE=$imem BOARD=iwe3000n ./build_kernel.sh"
 }
 
 cmd_shell() {

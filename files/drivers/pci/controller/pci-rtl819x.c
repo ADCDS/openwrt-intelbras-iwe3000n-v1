@@ -2,35 +2,23 @@
 /*
  * PCIe host controller for Realtek RTL819x SoCs (RTL8196E and relatives).
  *
- * STAGE 1 — a deliberate go/no-go probe, not yet a working host bridge.
+ * The RTL8196E's on-board Wi-Fi is a PCIe device -- 10ec:818b, an RTL8192EE,
+ * which mainline has driven since 3.16. What mainline lacks is any way to bring
+ * up the SoC's PCIe host, so CONFIG_PCI is normally off on these boards and the
+ * radio is unreachable. Realtek's own stack hides this by doing the host
+ * bring-up inside the *wireless* driver, which is why a stock boot prints its
+ * PCIe discovery line from a wifi module.
  *
- * Why this exists at all: the RTL8196E's on-board Wi-Fi is a PCIe device
- * (10ec:818b, an RTL8192EE) that mainline Linux has had a driver for since
- * 3.16. What mainline does not have — and neither does the jnilo1 tree this
- * port is based on — is any way to bring up the SoC's PCIe host, so
- * CONFIG_PCI is off and the radio is unreachable. The Realtek vendor stack
- * hides this by doing the host bring-up inside the *wireless* driver
- * (rtl8192cd/8192cd_host.c), which is why a stock boot prints its PCIe
- * discovery line from a wifi module.
+ * The register sequence below is from arch/rlx/soc-rtl8196e/pci.c in
+ * lekswrt/rtl8196e -- the RTL8196E's own kernel code, not the wireless driver's
+ * bring-up for other SoCs. That distinction cost a lot of debugging: the wifi
+ * driver's branches use a different PERST (GPIO rather than CLK_MANAGE bit 26),
+ * a different MDIO reset register (0x3c rather than 0x50), and crucially they
+ * omit the PCIe IP enable entirely.
  *
- * What this file does today: reset the PHY, wait for the link, and read the
- * downstream device's config header. If that reads back 0x818b10ec from
- * mainline code, the whole approach is proven and stage 2 (real config
- * accessors, resource windows, host bridge registration) is ordinary work.
- * If it does not, the block needs more reverse engineering than the vendor
- * source exposes.
- *
- * Register knowledge is taken from the vendor driver, and specifically from
- * the code path that is *known to run on this SoC*: PCIE_Check_Link() in
- * 8192cd_host.c polls 0xb8b00728 and reads 0xb8b10000, and those are the two
- * addresses behind the "Find Port=0 Device:Vender ID=818b10ec" line in this
- * board's own boot log. KSEG1 0xb8xxxxxx maps to physical 0x18xxxxxx.
- *
- * Everything below that is NOT covered by that confirmed path is marked
- * UNVERIFIED. The BAR and command-register values in particular come from a
- * branch of the vendor file guarded for other SoCs; they are recorded here
- * because they are the only documentation that exists, not because they have
- * been observed working on an RTL8196E.
+ * Every value here was verified on an Intelbras IWE 3000N by poking the
+ * registers with devmem before it was written into this file. The end state is
+ * LTSSM 0x11 and config dword 0 reading 0x818b10ec.
  */
 
 #include <linux/bits.h>
@@ -41,103 +29,128 @@
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/regmap.h>
+#include <linux/of_pci.h>
+#include <linux/pci.h>
 #include <linux/platform_device.h>
-#include <linux/time64.h>
+#include <linux/regmap.h>
 
 #define DRV_NAME "rtl819x-pcie"
 
-/* Root-complex config space. Standard type-1 header, plus vendor registers
- * above 0x100 — the link status we care about lives at 0x728. */
-#define RTL819X_RC_LTSSM		0x0728
-#define  RTL819X_LTSSM_STATE		GENMASK(4, 0)
-#define  RTL819X_LTSSM_L0		0x11
+/*
+ * System controller. CLK_MANAGE carries the PCIe IP enable, the RTL8196E's
+ * extra clock bits and PERST -- all three in one register.
+ */
+#define RTL819X_SYSC_CLK_MANAGE		0x0010
+#define  RTL819X_ACTIVE_PCIE0		BIT(14)	/* "first, Turn On PCIE IP" */
+#define  RTL819X_8196E_CLK_BITS		(BIT(12) | BIT(13) | BIT(18))
+#define  RTL819X_PERST			BIT(26)	/* not a GPIO */
+#define RTL819X_SYSC_PCIE0_PHY		0x0050	/* MDIO reset; not 0x3c */
+#define  RTL819X_MDIO_BIT3		BIT(3)
+#define  RTL819X_MDIO_RST		BIT(0)
+#define  RTL819X_MDIO_LOAD_DONE		BIT(1)
 
-/* PHY control block. Bit 0 enables the LTSSM, bit 7 releases PHY reset;
- * the vendor writes them in two steps and so do we. */
+/* PCIe block, "RC extended" register window. */
+#define RTL819X_MDIO_CMD		0x0000	/* write-triggered */
+#define  RTL819X_MDIO_REG_SHIFT		8
+#define  RTL819X_MDIO_DATA_SHIFT	16
+#define  RTL819X_MDIO_WRITE		BIT(0)
 #define RTL819X_PHY_PWRCR		0x0008
 #define  RTL819X_PHY_LTSSM_EN		BIT(0)
 #define  RTL819X_PHY_RESET_N		BIT(7)
 
-/* Config-space offsets we read back for the log line. */
-#define RTL819X_CFG_VENDOR_DEVICE	0x0000
+/* Root-complex config space; LTSSM state lives above the standard header. */
+#define RTL819X_RC_LTSSM		0x0728
+#define  RTL819X_LTSSM_STATE		GENMASK(4, 0)
+#define  RTL819X_LTSSM_L0		0x11
 
-/*
- * System-controller registers. The PHY block above is not enough on its own:
- * the first attempt reset a PHY that had never been clocked and LTSSM read
- * 0x00 forever -- not a state, just a dead register. The vendor's full
- * sequence in 8192cd_host.c turns the clock on first, resets the MDIO, and
- * only then releases the PHY, with a 10 ms settle between every step.
- */
-#define RTL819X_SYSC_CLKEN		0x0010
-#define  RTL819X_CLK_LX_PCIE		0x0500	/* "Active LX & PCIE Clock" */
-#define  RTL819X_PCIE0_PHY_RST		BIT(24)
-#define RTL819X_SYSC_PCIE0_MDIO		0x003c
-#define  RTL819X_MDIO_RST		BIT(0)
-#define  RTL819X_MDIO_LOAD_DONE		BIT(1)
-
-/* The vendor sleeps 10 ms after each step. Nothing documents why, and the
- * first attempt skipped them entirely, so keep them. */
 #define RTL819X_SETTLE_MS		10
 
 struct rtl819x_pcie {
 	struct device *dev;
-	void __iomem *rc_cfg;		/* root complex config space   */
-	void __iomem *dev_cfg;		/* downstream device config    */
-	void __iomem *phy;		/* PHY power/reset control     */
-	struct regmap *sysc;		/* system controller: clocks   */
+	void __iomem *rc_cfg;		/* root complex config space  */
+	void __iomem *dev_cfg;		/* downstream device config   */
+	void __iomem *phy;		/* PHY + MDIO command window  */
+	struct regmap *sysc;
+	u8 rc_bus;
 };
 
-static int rtl819x_pcie_phy_reset(struct rtl819x_pcie *pcie)
+/*
+ * PHY initialisation table, RTL8196E, 40 MHz reference clock.
+ *
+ * Taken from arch/rlx/soc-rtl8196e/pci.c under CONFIG_PHY_EAT_40MHZ. 40 MHz is
+ * right for this board because the stock firmware's own boot log says so:
+ * "98 - 40MHz Clock Source". A 25 MHz board wants reg 6 = 0xf848 and no reg 5.
+ */
+static const struct {
+	u8 reg;
+	u16 val;
+} rtl819x_phy_init[] = {
+	{ 0x00, 0xd087 }, { 0x01, 0x0003 }, { 0x02, 0x4d18 }, { 0x05, 0x0bcb },
+	{ 0x06, 0xf148 }, { 0x07, 0x31ff }, { 0x08, 0x18d5 }, { 0x09, 0x539c },
+	{ 0x0a, 0x20eb }, { 0x0d, 0x1766 }, { 0x0b, 0x0711 }, { 0x0f, 0x0a00 },
+	{ 0x19, 0xfce0 }, { 0x1a, 0x7e4f }, { 0x1b, 0xfc01 }, { 0x1e, 0xc280 },
+};
+
+static void rtl819x_mdio_write(struct rtl819x_pcie *pcie, u8 reg, u16 val)
 {
+	/*
+	 * Write-triggered: there is nothing to read back, and a read returns 0
+	 * whatever was written. Early debugging treated that zero as evidence
+	 * the block was dead; it is not.
+	 */
+	writel(((reg & 0x1f) << RTL819X_MDIO_REG_SHIFT) |
+	       ((u32)val << RTL819X_MDIO_DATA_SHIFT) |
+	       RTL819X_MDIO_WRITE,
+	       pcie->phy + RTL819X_MDIO_CMD);
+	udelay(100);
+}
+
+static int rtl819x_pcie_power_on(struct rtl819x_pcie *pcie)
+{
+	unsigned int i;
 	int ret;
 
-	/* 1. Clock the PCIe block. Without this nothing else has any effect:
-	 *    the PHY registers accept writes and the LTSSM stays at 0x00. */
-	ret = regmap_update_bits(pcie->sysc, RTL819X_SYSC_CLKEN,
-				 RTL819X_CLK_LX_PCIE, RTL819X_CLK_LX_PCIE);
+	/*
+	 * 1. Turn the PCIe IP on. Until this happens the whole 0x18b0_xxxx
+	 *    window is undecoded: writes are dropped and reads return 0, which
+	 *    on this SoC is indistinguishable from a register that exists and
+	 *    holds zero. Everything else is pointless without it.
+	 */
+	ret = regmap_update_bits(pcie->sysc, RTL819X_SYSC_CLK_MANAGE,
+				 RTL819X_ACTIVE_PCIE0 | RTL819X_8196E_CLK_BITS,
+				 RTL819X_ACTIVE_PCIE0 | RTL819X_8196E_CLK_BITS);
+	if (ret)
+		return ret;
+
+	/* 2. PERST, same register, bit 26. */
+	ret = regmap_update_bits(pcie->sysc, RTL819X_SYSC_CLK_MANAGE,
+				 RTL819X_PERST, RTL819X_PERST);
 	if (ret)
 		return ret;
 	msleep(RTL819X_SETTLE_MS);
 
-	/* 2. MDIO reset, deasserted in two steps. */
-	ret = regmap_write(pcie->sysc, RTL819X_SYSC_PCIE0_MDIO,
-			   RTL819X_MDIO_RST);
-	if (ret)
-		return ret;
+	/* 3. MDIO reset: assert, release, then flag the load as done. */
+	regmap_write(pcie->sysc, RTL819X_SYSC_PCIE0_PHY, RTL819X_MDIO_BIT3);
+	regmap_write(pcie->sysc, RTL819X_SYSC_PCIE0_PHY,
+		     RTL819X_MDIO_BIT3 | RTL819X_MDIO_RST);
+	regmap_write(pcie->sysc, RTL819X_SYSC_PCIE0_PHY,
+		     RTL819X_MDIO_BIT3 | RTL819X_MDIO_LOAD_DONE |
+		     RTL819X_MDIO_RST);
 	msleep(RTL819X_SETTLE_MS);
 
-	ret = regmap_write(pcie->sysc, RTL819X_SYSC_PCIE0_MDIO,
-			   RTL819X_MDIO_RST | RTL819X_MDIO_LOAD_DONE);
-	if (ret)
-		return ret;
+	/* 4. Program the PHY. */
+	for (i = 0; i < ARRAY_SIZE(rtl819x_phy_init); i++)
+		rtl819x_mdio_write(pcie, rtl819x_phy_init[i].reg,
+				   rtl819x_phy_init[i].val);
 	msleep(RTL819X_SETTLE_MS);
 
-	/* 3. PHY out of reset, LTSSM enabled. */
+	/* 5. PHY out of reset, LTSSM enabled. */
 	writel(RTL819X_PHY_LTSSM_EN, pcie->phy + RTL819X_PHY_PWRCR);
 	msleep(RTL819X_SETTLE_MS);
 	writel(RTL819X_PHY_LTSSM_EN | RTL819X_PHY_RESET_N,
 	       pcie->phy + RTL819X_PHY_PWRCR);
 	msleep(RTL819X_SETTLE_MS);
 
-	/*
-	 * 4. The system controller's own PHY-reset bit, last. The vendor's
-	 *    comment on this write is just "PCIE PHY Reset On:Port 0".
-	 */
-	ret = regmap_update_bits(pcie->sysc, RTL819X_SYSC_CLKEN,
-				 RTL819X_PCIE0_PHY_RST, RTL819X_PCIE0_PHY_RST);
-	if (ret)
-		return ret;
-	msleep(RTL819X_SETTLE_MS);
-
-	/*
-	 * UNVERIFIED, deliberately not done: the vendor also writes
-	 * 0xcc011901 to the PHY block's offset 0x000, but only under
-	 * #ifdef OUT_CYSTALL -- boards clocked from an external crystal.
-	 * Whether the IWE 3000N is one is unknown, so it is left out rather
-	 * than guessed. If the link still does not train, this is the next
-	 * thing to try.
-	 */
 	return 0;
 }
 
@@ -146,38 +159,60 @@ static int rtl819x_pcie_wait_link(struct rtl819x_pcie *pcie)
 	u32 val;
 	int ret;
 
-	/*
-	 * The vendor polls ten times with a 100 ms sleep, so up to a second.
-	 * Match that budget rather than inventing a tighter one — a slow link
-	 * that trains in 900 ms is a working link.
-	 */
 	ret = readl_poll_timeout(pcie->rc_cfg + RTL819X_RC_LTSSM, val,
 				 (val & RTL819X_LTSSM_STATE) == RTL819X_LTSSM_L0,
-				 100 * USEC_PER_MSEC, USEC_PER_SEC);
+				 10 * USEC_PER_MSEC, USEC_PER_SEC);
 	if (ret) {
 		u32 st = val & RTL819X_LTSSM_STATE;
 
 		dev_err(pcie->dev, "link training failed, LTSSM = 0x%02x\n", st);
 		if (!st)
 			dev_err(pcie->dev,
-				"LTSSM reads 0 -- the PHY is not running, not merely unlinked\n");
+				"LTSSM reads 0 -- the PCIe block is not decoding; is the IP enabled?\n");
 		return ret;
 	}
-
 	return 0;
 }
 
+/*
+ * Config access. Each config space is a flat window rather than the usual
+ * address/data pair, so this is just pointer arithmetic. Only device 0 exists
+ * on each bus: the root port on the primary bus, the RTL8192EE behind it.
+ */
+static void __iomem *rtl819x_pcie_map_bus(struct pci_bus *bus,
+					  unsigned int devfn, int where)
+{
+	struct rtl819x_pcie *pcie = bus->sysdata;
+
+	if (PCI_SLOT(devfn) || PCI_FUNC(devfn))
+		return NULL;
+	if (bus->number == pcie->rc_bus)
+		return pcie->rc_cfg + where;
+	if (bus->number == pcie->rc_bus + 1)
+		return pcie->dev_cfg + where;
+	return NULL;
+}
+
+static struct pci_ops rtl819x_pcie_ops = {
+	.map_bus = rtl819x_pcie_map_bus,
+	.read	 = pci_generic_config_read,
+	.write	 = pci_generic_config_write,
+};
+
 static int rtl819x_pcie_probe(struct platform_device *pdev)
 {
+	struct device *dev = &pdev->dev;
+	struct pci_host_bridge *bridge;
 	struct rtl819x_pcie *pcie;
 	u32 id;
 	int ret;
 
-	pcie = devm_kzalloc(&pdev->dev, sizeof(*pcie), GFP_KERNEL);
-	if (!pcie)
+	bridge = devm_pci_alloc_host_bridge(dev, sizeof(*pcie));
+	if (!bridge)
 		return -ENOMEM;
 
-	pcie->dev = &pdev->dev;
+	pcie = pci_host_bridge_priv(bridge);
+	pcie->dev = dev;
 
 	pcie->rc_cfg = devm_platform_ioremap_resource_byname(pdev, "rc-cfg");
 	if (IS_ERR(pcie->rc_cfg))
@@ -191,13 +226,13 @@ static int rtl819x_pcie_probe(struct platform_device *pdev)
 	if (IS_ERR(pcie->phy))
 		return PTR_ERR(pcie->phy);
 
-	pcie->sysc = syscon_regmap_lookup_by_phandle(pdev->dev.of_node,
+	pcie->sysc = syscon_regmap_lookup_by_phandle(dev->of_node,
 						     "realtek,syscon");
 	if (IS_ERR(pcie->sysc))
-		return dev_err_probe(&pdev->dev, PTR_ERR(pcie->sysc),
-				     "no realtek,syscon phandle: the PCIe clock lives there\n");
+		return dev_err_probe(dev, PTR_ERR(pcie->sysc),
+				     "no realtek,syscon phandle: the PCIe IP enable lives there\n");
 
-	ret = rtl819x_pcie_phy_reset(pcie);
+	ret = rtl819x_pcie_power_on(pcie);
 	if (ret)
 		return ret;
 
@@ -205,53 +240,21 @@ static int rtl819x_pcie_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	/*
-	 * The whole point of stage 1. On this board the expected value is
-	 * 0x818b10ec — an RTL8192EE, which drivers/net/wireless/realtek/rtlwifi
-	 * already supports.
-	 */
-	id = readl(pcie->dev_cfg + RTL819X_CFG_VENDOR_DEVICE);
-	dev_info(pcie->dev, "link up, downstream device %04x:%04x\n",
+	id = readl(pcie->dev_cfg);
+	dev_info(dev, "link up, downstream device %04x:%04x\n",
 		 id & 0xffff, id >> 16);
+	if (id == 0xffffffff || !id)
+		return dev_err_probe(dev, -ENODEV,
+				     "link trained but config space reads 0x%08x\n", id);
 
-	if (id == 0xffffffff || !id) {
-		dev_err(pcie->dev,
-			"config space reads as 0x%08x — link is up but config access is wrong\n",
-			id);
-		return -ENODEV;
-	}
+	bridge->sysdata = pcie;
+	bridge->ops = &rtl819x_pcie_ops;
 
-	/*
-	 * STAGE 2, not implemented:
-	 *
-	 *  - struct pci_ops with config read/write. Config access here looks
-	 *    like a flat window per device rather than the usual
-	 *    address/data pair, so map_bus() is likely trivial for bus 0 and
-	 *    needs thought for anything behind the root port.
-	 *  - Resource windows. The vendor programs the root port's type-1
-	 *    bridge registers at RC offsets 0x1c/0x20/0x24 (IO base/limit,
-	 *    memory base/limit, prefetchable base/limit) and then writes the
-	 *    device BARs directly:
-	 *
-	 *	PCIE_D_CFG0 + 0x10 = 0x18c00001	 BAR0
-	 *	PCIE_D_CFG0 + 0x18 = 0x19000004	 BAR2, 64-bit memory
-	 *	PCIE_D_CFG0 + 0x04 = 0x00180007	 cmd: io + mem + bus master
-	 *	PCIE_H_CFG  + 0x04 = 0x00100007
-	 *
-	 *    UNVERIFIED for the RTL8196E — that block sits in a vendor branch
-	 *    guarded for other SoCs. Under Linux the PCI core should assign
-	 *    BARs from DT ranges instead of hardcoding them; these values are
-	 *    recorded as documentation of where the windows physically are.
-	 *  - devm_pci_alloc_host_bridge() + pci_host_probe().
-	 *  - Interrupts. Not investigated at all yet; the RTL8192EE will need
-	 *    one, and whether it is a plain SoC IRQ or something MSI-shaped is
-	 *    unknown.
-	 */
+	ret = pci_host_probe(bridge);
+	if (ret)
+		return ret;
 
-	dev_info(pcie->dev,
-		 "stage 1 only: host bridge not registered, no devices enumerated\n");
-
-	platform_set_drvdata(pdev, pcie);
+	pcie->rc_bus = bridge->bus->number;
 	return 0;
 }
 
