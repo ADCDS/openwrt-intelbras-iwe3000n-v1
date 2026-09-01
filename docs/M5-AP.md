@@ -865,8 +865,15 @@ Connected to 00:e0:4c:81:92:65 (on wlx14cc20239af1)  SSID: IWE3000N-test
 hostapd: `14:cc:20:23:9a:f1 flags=[AUTH][ASSOC][AUTHORIZED][SHORT_PREAMBLE][WMM][HT]`
 — the 4-way handshake completed. Traffic: host→AP `ping -c 20 -i 0.2`
 **19/20 received**; AP→host `ping -c 10` **10/10, 0% loss**. First
-association ever on this board. Heavier traffic and a soak are the next
-measurements (below).
+association ever on this board.
+
+Second association (same boot) connected on the first try, then:
+`ping -i 0.002 -c 500` (56 B) **494/500, 1.2% loss**; `ping -s 1400 -i 0.005
+-c 300` **287/300, 4.3%**; `ping -c 60` at 1/s **46/60, 23%**. Bursts pass
+well; the slow steady ping loses far more than the fast ones, which is the
+shape of a power-save interaction (client dozing between pings, AP-side
+buffering/wakeup) rather than of RF or memory trouble — a follow-up, not a
+blocker. MemFree held at ~10.8 MiB throughout and `dmesg` stayed clean.
 
 Retrospective, briefly: three distinct faults stacked. (1) A level INTA storm
 through the ISR's `irq_enabled == 0` exit froze the box on every AP start
