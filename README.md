@@ -3,14 +3,18 @@
 OpenWrt for the **Intelbras IWE 3000N v1** — RealTek **RTL8196E**, 4 MB flash,
 32 MB RAM, RTL8192EE 2.4 GHz radio.
 
-> ## Status: **it boots, routes, and beacons.** jnilo1 Linux 6.18 on the board.
+> ## Status: **it boots and routes over ethernet; the radio is not there yet.**
 >
-> M1–M6 are verified on hardware and committed. The board runs a 1784 KiB
-> kernel + squashfs rootfs flashed over the loader's TFTP: ethernet works, the
-> RTL8192EE comes up over a from-scratch PCIe host driver, and `hostapd` brings
-> up a WPA2 AP that reaches `AP-ENABLED`. The one thing left is a real client
-> associating and passing traffic, which needs a person with a phone — see
-> [`docs/M5-AP.md`](docs/M5-AP.md). Per-milestone results are in `docs/M*.md`.
+> The board runs jnilo1 Linux 6.18 from a kernel + squashfs rootfs flashed over
+> the loader's TFTP. Ethernet works and the RTL8192EE enumerates over a
+> from-scratch PCIe host driver; M1–M4 and M6 are verified on hardware. **M5 is
+> not complete**: three real bugs are fixed (BAR aperture, a big-endian efuse
+> misread, idle power-save), `hostapd` reaches `AP-ENABLED` and every TX-path
+> register is armed at healthy power — but a monitor-mode capture shows the radio
+> emits nothing, while IQK's internal loopback still passes. The cause is the
+> board's RF front end (antenna-switch/PA GPIOs) that mainline `rtl8192ee` has no
+> profile for. The honest write-up, with the register and capture evidence, is
+> [`docs/M5-AP.md`](docs/M5-AP.md).
 >
 > `./build.sh kernel` and `./build.sh rootfs` build the images; recovery to
 > stock is [`../iwe3000n-firmware/RESTORE-TO-STOCK.md`](../iwe3000n-firmware/RESTORE-TO-STOCK.md).
@@ -87,12 +91,14 @@ All verified on hardware and committed; the write-up for each is in
 - **M4 — Ethernet, then flash write.** ✅ Ethernet works and the loader's TFTP
   writes the kernel at `0x00010000`; the RTL8192EE enumerates over a
   from-scratch PCIe host driver. [`docs/M4-RADIO.md`](docs/M4-RADIO.md).
-- **M5 — Wi-Fi.** ✅ **The radio works.** Not a `rtl8192cd` forward-port after
-  all — the radio is a **RTL8192EE** (`10ec:818b`) mainline has driven since
-  Linux 3.16, and the missing piece was a **PCIe host controller** for the
-  RTL819x, now written (`files/drivers/pci/controller/pci-rtl819x.c`). `hostapd`
-  reaches `AP-ENABLED`; a real-client test needs a phone.
-  [`docs/M5-AP.md`](docs/M5-AP.md), [`docs/WIFI-PLAN.md`](docs/WIFI-PLAN.md).
+- **M5 — Wi-Fi.** ⏳ **Partly there, not done.** The radio is a **RTL8192EE**
+  (`10ec:818b`) on a **PCIe host controller** written for this port
+  (`files/drivers/pci/controller/pci-rtl819x.c`). Three real bugs fixed — BAR
+  aperture, a big-endian efuse misread (`rtlwifi/efuse.c`), and idle power-save
+  — get it to `AP-ENABLED` with every TX register armed, but a monitor capture
+  shows nothing on the air: the board's RF front end (antenna switch / PA) is not
+  driven, and mainline has no profile for it. See [`docs/M5-AP.md`](docs/M5-AP.md)
+  and [`docs/WIFI-PLAN.md`](docs/WIFI-PLAN.md).
 - **M6 — Fit 4 MB.** ✅ Kernel 1784 KiB, rootfs 923 KiB, both within their
   partitions. [`docs/M6-FLASH-BUDGET.md`](docs/M6-FLASH-BUDGET.md).
 

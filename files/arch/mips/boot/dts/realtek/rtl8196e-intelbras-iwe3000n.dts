@@ -33,7 +33,7 @@
 	model = "Intelbras IWE 3000N v1";
 
 	chosen {
-		bootargs = "console=ttyS0,38400 loglevel=7 root=/dev/mtdblock2 rootfstype=squashfs";
+		bootargs = "console=ttyS0,38400 loglevel=7 root=/dev/mtdblock2 rootfstype=squashfs rtl8192ee.ips=0 rtl8192ee.fwlps=0 rtl8192ee.swlps=0";
 	};
 
 	memory@0 {

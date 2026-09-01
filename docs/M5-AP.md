@@ -1,132 +1,134 @@
 # M5 — hostapd AP on the RTL8192EE
 
-**Status: the radio works. hostapd brings up a beaconing WPA2 AP.** MAC init
-succeeds, `wlan0` reaches `AP-ENABLED`, and the interface carries a beacon. The
-one part of M5's definition that a board cannot self-test — a real client
-associating and passing traffic — is left for a person with a phone (see the
-end of this file); everything up to that point is verified on hardware.
+**Status: not complete. Three real driver bugs found and fixed; the radio still
+emits nothing, and a monitor capture pins the cause on the board's RF front end
+— antenna-switch/PA settings mainline has no profile for.** What works is
+verified on hardware; what does not is characterised down to the register level
+and confirmed off the air below. No guess here is presented as a result.
 
-## What was actually wrong: BAR 2 was in I/O space, not memory
+## Layer by layer, what was wrong and what is fixed
 
-For a long time this failed with:
+### 1. MAC init failed — BAR 2 was in the I/O aperture (FIXED)
 
-```
-rtlwifi: RTL8XXX did not boot from eeprom, check it !!
-[   68.587040] rtl8192ee: Init MAC failed
-```
-
-and the working theory was the missing efuse (this board's calibration lives in
-the H601 factory block, not an EEPROM). **That theory was wrong.** The eeprom
-line was a red herring; it disappears entirely once the real bug is fixed.
-
-The real bug was in the PCIe host bridge's `ranges`. The RTL8196E decodes two
-fixed apertures for downstream PCIe, and its own `bspchip.h` names them:
+The RTL8196E decodes two fixed apertures (its own `bspchip.h`):
 
 ```
-BSP_PCIE0_D_IO   0xB8C00000   -> phys 0x18C00000     I/O transactions
-BSP_PCIE0_D_MEM  0xB9000000   -> phys 0x19000000     memory transactions
+BSP_PCIE0_D_IO   0xB8C00000  -> phys 0x18C00000   I/O transactions
+BSP_PCIE0_D_MEM  0xB9000000  -> phys 0x19000000   memory transactions
 ```
 
-The first version of the DT node declared a single window at `0x18c00000` and
-labelled it *memory*. That is the **I/O** aperture. So the PCI core assigned the
-endpoint's MMIO BAR — BAR 2, the only BAR `rtl8192ee` uses — to `0x18c00000`,
-and every driver register access to the chip went onto the wire as a PCIe **I/O**
-TLP instead of a memory one. The chip never saw its register writes.
+The first DT declared a single window at `0x18c00000` as *memory*. That is the
+I/O aperture, so BAR 2 (the only BAR `rtl8192ee` uses) was assigned there and
+every register access went out as a PCIe I/O TLP. `_rtl92ee_init_mac()` — the
+first bulk-MMIO step — timed out (`Init MAC failed`) while link training and
+config space, which never touch BAR 2, looked healthy.
 
-This is exactly why M3 and M4 passed while M5 failed. Link training (LTSSM → L0)
-and config-space enumeration do not touch BAR 2, so they were fine and looked
-like a healthy radio. `_rtl92ee_init_mac()` is the first thing that does bulk
-MMIO through BAR 2, so it — and only it — timed out.
+Fix: one memory range at `0x19000000`. Verified:
+`pci 0000:01:00.0: BAR 2 [mem 0x19000000-0x19003fff 64bit]: assigned`, and MAC
+init stopped failing. (No I/O range is declared — see the DT comment; an I/O
+range trips a `vmap_page_range` BUG on this Lexra MIPS.)
 
-Proof, from the failing boot:
+### 2. The efuse read was byte-swapped — big-endian bug in rtlwifi (FIXED)
 
-```
-pci 0000:01:00.0: BAR 2 [mem 0x18c00000-0x18c03fff 64bit]: assigned   <- I/O aperture
-[   68.587040] rtl8192ee: Init MAC failed
-```
-
-## The fix: one memory range at the memory aperture
+With MMIO working, the driver still rejected the chip's efuse:
 
 ```
-ranges = <0x02000000 0x0 0x19000000   0x01000000   0x0 0x01000000>;
+rtlwifi: EEPROM ID(0x2981) is invalid!!
 ```
 
-BAR 2 now lands where memory transactions actually reach the endpoint:
+`0x2981` is `0x8129` (the RTL8192E magic) with its bytes swapped, and it is not
+`0xffff`, so the efuse *is* programmed — it was being read wrong. The RTL8196E is
+big-endian (`CONFIG_CPU_BIG_ENDIAN=y`); `rtl_get_hwinfo()` in `rtlwifi/efuse.c`
+reads the little-endian efuse map with plain `*(u16 *)` casts, so every 16-bit
+field comes out byte-swapped. The ID check failed and the driver fell back to
+default MAC / TX-power / crystal calibration.
+
+Fix: `patches/rtlwifi-efuse-big-endian-eeprom-id.patch` reads those fields with
+`le16_to_cpup()` (a no-op on little-endian, so a correct general fix). Verified:
 
 ```
-pci 0000:01:00.0: BAR 2 [mem 0x19000000-0x19003fff 64bit]: assigned
+rtlwifi: Autoload OK
+rtlwifi: EEPROMId = 0x8129
+rtlwifi: Chip RF Type: RF_2T2R
 ```
 
-and the eeprom warning and `Init MAC failed` are both gone.
+The real MAC and the real TXAGC/crystal values now load from the efuse.
 
-**No I/O range is declared, on purpose.** Two reasons:
+### 3. Power save (FIXED, but not the cause)
 
-1. The RTL8192EE advertises a 0x100-byte I/O BAR (BAR 0) that the driver never
-   touches. Leaving it unassigned costs one boot-time warning
-   (`BAR 0 [io ...]: can't assign; no space`) and nothing else.
-2. Declaring an I/O range makes the generic host-bridge code call
-   `devm_pci_remap_iospace()` → `vmap_page_range()`, which **BUGs** on this
-   Lexra MIPS — it has no `PCI_IOBASE` fixmap region to map the aperture into.
-   The probe never returns:
+An AP with no associated client is "idle", and rtlwifi's power-save then reports
+the radio off — `FillH2CCommand8192E(): Return because RF is off!!!` on a 2 s
+loop. The DT bootargs now carry `rtl8192ee.ips=0 fwlps=0 swlps=0` (verified
+`ips=N fwlps=N swlps=N`), which clears that state completely (the message count
+drops from ~160 to 0). Correct for an rtlwifi AP — but it did **not** put RF on
+the air: a second monitor capture with power-save fully off still saw zero
+frames from our BSSID. So the "RF is off" software state was a red herring for
+emission; power save is ruled out as the cause.
 
-   ```
-   Kernel bug detected[#1]:
-   Call Trace:
-   [<800b4354>] vmap_page_range+0x40/0x1d4
-   [<801c3ccc>] devm_pci_remap_iospace+0x5c/0xa0
-   [<801cf748>] rtl819x_pcie_probe+0x30/0x34c
-   ```
+## Where it stands: armed to transmit, but silent
 
-   A 64 KiB I/O range (a legal subset of the 2 MB aperture) avoids the resource
-   collision but still hits this BUG. Memory-only is the only thing that both
-   probes cleanly and puts BAR 2 in the right place.
+After all three fixes, `hostapd` reaches `AP-ENABLED` and **every transmit-path
+register is enabled**, read live over BAR 2 with `devmem` while the AP ran:
 
-## Verified on hardware
+| reg | value | meaning |
+|-----|-------|---------|
+| 0x100 CR | `0x16FF` | MACTXEN, MACRXEN, TXDMA/RXDMA, PROTOCOL, SCHEDULE, **ENSWBCN** all set |
+| 0x1c RF_CTRL | byte `0x07` | RFEN, RFRSTB, RFSDMRSTB — RF enabled, out of reset |
+| 0x800 RFMOD | `0x83040000` | CCK_EN and OFDM_EN set — BB TX path on |
+| 0x522 TXPAUSE | `0x00` | no queue paused, beacon queue free to send |
+| 0xe00.. TXAGC | `0x37373939`… | per-rate TX power ~0x30–0x3D of 0x3F — healthy, not zero |
 
-```
-# ip link set wlan0 up            -> rc=0, no "Init MAC failed"
-# ip link show wlan0
-3: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> ... state UP
-# hostapd /etc/hostapd.conf
-wlan0: interface state UNINITIALIZED->COUNTRY_UPDATE
-wlan0: interface state COUNTRY_UPDATE->ENABLED
-wlan0: AP-ENABLED
-# hostapd_cli -p /var/run/hostapd status
-state=ENABLED  channel=6  ssid[0]=IWE3000N-test  bssid[0]=00:e0:4c:81:92:41
-```
+IQK runs (`Path A/B Tx IQK Success`, `Path B Rx IQK Success`; `Path A Rx IQK
+Fail` is common and non-fatal) and `hw init` returns 0.
 
-## The one thing left, and why it needs a person
+**And yet nothing reaches the air at all.** A monitor-mode capture settles it.
+The RT3070 on the build host, put in monitor mode on channel 6, captured 120
+frames in 12 s: **113 from the co-channel Realtek AP 30 cm away** (`00:e0:4c:81:
+86:86`) and **zero from our BSSID** `00:e0:4c:81:92:c2`. Monitor mode passes
+raw frames including bad-FCS ones, so a malformed beacon would still show — the
+silence is total. A phone sees nothing either. The PCIe interrupt count stays 0
+(`/proc/interrupts`: `14 rtl_pci`), consistent with the radio emitting nothing.
 
-"A real client associates and passes traffic" cannot be self-tested from the
-board. The AP is left running for it:
+## The remaining blocker: the antenna path is not driven
 
-- SSID `IWE3000N-test`, WPA2-PSK `iwe3000n-bench`, channel 6.
-- `wlan0` has `192.168.50.1/24`.
-- **There is no DHCP server on the board** — only busybox `udhcpc`, a client.
-  So a phone associates (that exercises the 4-way handshake, the real proof the
-  radio encrypts and decrypts), but to pass traffic it needs a static address:
-  set the phone to `192.168.50.2/24` and `ping 192.168.50.1`.
+The monitor capture rules out the beacon-content / DMA theory outright — a
+malformed frame would have been captured, and nothing was. The MAC, BB and
+beacon logic are all armed (registers above), TX power is real, yet **no RF
+energy leaves the radio.**
 
-Watch the association from the board with `hostapd_cli -p /var/run/hostapd all_sta`
-or by tailing hostapd; a `AP-STA-CONNECTED <mac>` line is the association.
+The RF core itself is not dead: Tx IQK succeeds, and IQK runs through the RF
+chip's *internal* loopback. So the chip can generate a TX tone internally but it
+never reaches the antenna. That points at the board's **RF front end** — the
+antenna switch and any external PA/LNA, driven by board-specific GPIO/RFE
+settings. Mainline `rtl8192ee` configures these from a small set of known board
+profiles; it has none for the IWE 3000N (`board_type` reads `0x0` from the
+efuse), so whatever antenna-switch GPIOs this board needs are never set and TX
+is left routed into a dead internal path.
 
-## The MAC is still the Realtek default
+This is exactly the M3 stop-condition, reached at M5: the RF-front-end register
+knowledge lives in the vendor `rtl8192cd` driver (which was written for this
+board and this big-endian SoC), not in mainline. Recovering it means reading the
+vendor driver's antenna-switch/RFE setup for this board and porting it — real
+work that changes the project's cost.
 
-`wlan0` comes up as `00:e0:4c:81:92:41`, a Realtek OUI default, not the board's
-`D8:77:8B:3F:E2:01` from the H601 block. That is the same open item as the
-ethernet MAC (`M2-ETHERNET.md`) and has the same fix — an `nvmem-cell` on the
-`boot` partition feeding the driver. It does not affect whether the AP works.
+## What a person could do next
 
-## What is already done and reusable
+- Port the vendor antenna-switch / RFE setup. Read how `rtl8192cd` (in the
+  vendor SDK, and in `lekswrt/rtl8196e`) configures the antenna switch and any
+  external PA GPIOs for this board, and reproduce it in the mainline
+  `rtl8192ee` `_rtl92ee_phy_set_rf_on` / RFE path. This is the direct fix for the
+  dead antenna path.
+- Or take the `lekswrt/rtl8196e` fallback wholesale (working eth + 8192E at 4 MB,
+  Linux 3.10): it runs the *vendor* `rtl8192cd` driver, which already knows this
+  board's RF front end and reads H601 calibration, sidestepping both the
+  efuse-endian bug and the antenna-path gap by not being mainline rtlwifi at all.
 
-- `tools/build-hostapd.sh` — hostapd 2.11 + libnl-tiny, **statically linked**,
-  cross-built with the Lexra toolchain. In the rootfs at `/sbin/hostapd`.
-- `files/rootfs/etc/hostapd.conf` — 2.4 GHz WPA2-PSK on channel 6.
-- Four build traps solved and commented in the script: CFLAGS via the
-  environment (not the make command line, which overrides hostapd's own
-  `+=`), `-D_GNU_SOURCE` for musl's `struct ucred`, `CONFIG_LIBNL_TINY` rather
-  than `CONFIG_LIBNL32`, and `-static` because this rootfs ships no dynamic
-  loader — a dynamically linked binary fails as "not found" even though the
-  file is plainly there.
-- `sbin/`, not `usr/sbin/`: the latter is a symlink to `/userdata/usr/sbin`,
-  the partition this board does not have.
+## What is done and reusable
+
+- The PCIe host driver (`files/drivers/pci/controller/pci-rtl819x.c`), link
+  training, enumeration, MAC init — all solid (M3/M4).
+- `tools/build-hostapd.sh` — static hostapd 2.11 at `/sbin/hostapd`; reaches
+  `AP-ENABLED`.
+- `files/rootfs/etc/hostapd.conf` — 2.4 GHz WPA2-PSK, channel 6.
+- The efuse patch and `ips=0` are correct and stay in the tree regardless of the
+  RF outcome — any working radio on this board needs them.

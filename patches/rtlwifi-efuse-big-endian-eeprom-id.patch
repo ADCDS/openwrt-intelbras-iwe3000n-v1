@@ -1,0 +1,54 @@
+rtlwifi: read efuse 16-bit fields little-endian
+
+The RTL8196E is a big-endian MIPS (CONFIG_CPU_BIG_ENDIAN=y). rtlwifi's
+rtl_get_hwinfo() reads the efuse shadow map, a little-endian byte array,
+with plain `*(u16 *)` casts. On a big-endian host every 16-bit field comes
+out byte-swapped, so the EEPROM ID magic 0x8129 is read as 0x2981, the
+autoload check fails, and the driver discards the chip's real MAC, TX-power
+and crystal-cap calibration and configures the radio from defaults. On the
+IWE 3000N that leaves hostapd reaching AP-ENABLED with no beacon on the air
+(measured: neither a phone nor an RT3070 sees the SSID while a co-channel AP
+30 cm away reads full signal; the on-chip efuse is programmed, not blank --
+0x2981 is byteswap(0x8129), not 0xffff).
+
+le16_to_cpup() is a no-op on little-endian, so this is a correct general
+fix, not a big-endian special case. The MAC loop below is left untouched: it
+reads with *(u16*) and writes back with *(u16*), so the two swaps cancel and
+dev_addr is already correct on both endiannesses. TX-power, xtal and
+board-type reads are byte-wise and were never affected.
+
+--- a/drivers/net/wireless/realtek/rtlwifi/efuse.c
++++ b/drivers/net/wireless/realtek/rtlwifi/efuse.c
+@@ -1247,7 +1247,7 @@
+ 	RT_PRINT_DATA(rtlpriv, COMP_INIT, DBG_DMESG, "MAP",
+ 		      hwinfo, max_size);
+ 
+-	eeprom_id = *((u16 *)&hwinfo[0]);
++	eeprom_id = le16_to_cpup((__le16 *)&hwinfo[0]);
+ 	if (eeprom_id != params[0]) {
+ 		rtl_dbg(rtlpriv, COMP_ERR, DBG_WARNING,
+ 			"EEPROM ID(%#x) is invalid!!\n", eeprom_id);
+@@ -1260,10 +1260,10 @@
+ 	if (rtlefuse->autoload_failflag)
+ 		return 1;
+ 
+-	rtlefuse->eeprom_vid = *(u16 *)&hwinfo[params[1]];
+-	rtlefuse->eeprom_did = *(u16 *)&hwinfo[params[2]];
+-	rtlefuse->eeprom_svid = *(u16 *)&hwinfo[params[3]];
+-	rtlefuse->eeprom_smid = *(u16 *)&hwinfo[params[4]];
++	rtlefuse->eeprom_vid = le16_to_cpup((__le16 *)&hwinfo[params[1]]);
++	rtlefuse->eeprom_did = le16_to_cpup((__le16 *)&hwinfo[params[2]]);
++	rtlefuse->eeprom_svid = le16_to_cpup((__le16 *)&hwinfo[params[3]]);
++	rtlefuse->eeprom_smid = le16_to_cpup((__le16 *)&hwinfo[params[4]]);
+ 	rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
+ 		"EEPROMId = 0x%4x\n", eeprom_id);
+ 	rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
+@@ -1282,7 +1282,7 @@
+ 	rtl_dbg(rtlpriv, COMP_INIT, DBG_DMESG, "%pM\n", rtlefuse->dev_addr);
+ 
+ 	rtlefuse->eeprom_channelplan = *&hwinfo[params[6]];
+-	rtlefuse->eeprom_version = *(u16 *)&hwinfo[params[7]];
++	rtlefuse->eeprom_version = le16_to_cpup((__le16 *)&hwinfo[params[7]]);
+ 	rtlefuse->txpwr_fromeprom = true;
+ 	rtlefuse->eeprom_oemid = *&hwinfo[params[8]];
+ 

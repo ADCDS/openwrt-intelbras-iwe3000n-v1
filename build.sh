@@ -98,6 +98,14 @@ PY
     install -Dm644 "$HERE/patches/drivers-pci-controller-rtl819x.patch" \
                    "$KDIR/patches-6.18/drivers-pci-controller-rtl819x.patch"
 
+    echo "==> [3b'] rtlwifi efuse big-endian fix"
+    # The RTL8196E is big-endian; mainline rtlwifi reads the little-endian efuse
+    # with *(u16 *) casts, so the EEPROM ID magic 0x8129 is misread as 0x2981,
+    # the chip's real MAC/TX-power/xtal calibration is discarded, and the radio
+    # comes up on defaults -- AP-ENABLED but silent. See the patch header.
+    install -Dm644 "$HERE/patches/rtlwifi-efuse-big-endian-eeprom-id.patch" \
+                   "$KDIR/patches-6.18/rtlwifi-efuse-big-endian-eeprom-id.patch"
+
     echo "==> [3c] SOC_RTL8196E must select HAVE_PCI + PCI_DRIVERS_GENERIC"
     # Upstream selects HW_HAS_PCI, which no longer gates anything: in 6.18
     # drivers/pci/Kconfig has "menuconfig PCI ... depends on HAVE_PCI". Without

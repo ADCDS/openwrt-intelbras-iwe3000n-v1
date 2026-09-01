@@ -68,15 +68,18 @@ extraction.
 
 ## Known, not yet addressed
 
-- **`rtlwifi: RTL8XXX did not boot from eeprom, check it !!`** — this appeared on
-  every boot up to M4 and seeded a wrong theory (missing efuse). It was a
-  *symptom* of the BAR 2 aperture bug, not a hardware fact: the autoload-status
-  read goes through MMIO, and MMIO was landing in I/O space. Once `ranges` was
-  corrected (see `M5-AP.md`) the warning disappeared and MAC init succeeded.
-- **The MAC is the Realtek default `00:e0:4c:...`, not the board's.** The real
-  MAC and RF calibration are in the H601 block at `mtd0+0x6000`. Feeding them to
-  the driver is future work and shares the `nvmem-cell` mechanism the ethernet
-  MAC needs (see `M2-ETHERNET.md`). It does not affect whether the radio works.
+- **The efuse read.** Up to M4 the driver printed `RTL8XXX did not boot from
+  eeprom` (a garbage-MMIO symptom of the BAR 2 aperture bug); correcting `ranges`
+  stopped it and MAC init succeeded. But the efuse *content* was still wrong,
+  which only a debug build revealed: `EEPROM ID(0x2981) is invalid!!`, the magic
+  0x8129 read byte-swapped on this big-endian CPU. That is a real rtlwifi bug,
+  fixed in M5 (`patches/rtlwifi-efuse-big-endian-eeprom-id.patch`); the efuse now
+  reads `Autoload OK` and the chip's real MAC and calibration load. See
+  `M5-AP.md`.
+- **The RTL8192EE's own efuse MAC** (now `00:e0:4c:81:92:b2`, read correctly
+  after the efuse fix) is the chip's, not the board's `D8:77:8B:3F:E2:01` from
+  the H601 block. Wiring the H601 MAC in is future work sharing the `nvmem-cell`
+  mechanism the ethernet MAC needs (see `M2-ETHERNET.md`).
 - **`BAR 0 [io size 0x0100]: can't assign; no space`** — the endpoint asks for a
   0x100-byte I/O BAR the driver never uses, and the DT declares no I/O range.
   **Leave it that way.** Adding an I/O range does not silence it harmlessly — it
