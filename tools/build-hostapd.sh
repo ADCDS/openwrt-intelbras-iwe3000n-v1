@@ -79,7 +79,12 @@ EOC
 # declares under _GNU_SOURCE. Without it every nl80211 file fails with
 # "field 'nm_creds' has incomplete type".
 export CFLAGS="-O2 -D_GNU_SOURCE -I${NLDIR}/include -DCONFIG_LIBNL20"
-export LIBS="-L${NLDIR} -lnl-tiny"
+# Static. The rootfs ships no dynamic loader: everything upstream builds is
+# static, so a dynamically linked binary dies as "not found" (ENOENT on
+# /lib/ld-musl-mips-sf.so.1, which the shell reports as command-not-found
+# even though the file is plainly there).
+export LDFLAGS="-static"
+export LIBS="-L${NLDIR} -lnl-tiny -static"
 make CC="$CC" -j"$(nproc)" hostapd hostapd_cli
 
 "${CROSS}-strip" hostapd hostapd_cli

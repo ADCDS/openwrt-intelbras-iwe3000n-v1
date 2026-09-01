@@ -21,10 +21,20 @@ rtt min/avg/max/mdev = 0.715/0.739/0.770/0.019 ms`.
 
 **iperf3 3.18, 10 s each way, board as client:**
 
-| direction | bitrate | retransmits |
+| direction | with I-MEM (M2 build) | without I-MEM (M4/M5 build) |
 |---|---|---|
-| TX (board → workstation) | **86.3 Mbit/s** sender, 86.1 receiver | **0** |
-| RX (workstation → board) | **94.2 Mbit/s** sender, 94.0 receiver | 1 |
+| TX (board → workstation) | **86.3 Mbit/s**, 0 retr | **73.5 Mbit/s**, 0 retr |
+| RX (workstation → board) | **94.2 Mbit/s**, 1 retr | **91.2 Mbit/s**, 1 retr |
+
+**Both columns are measured, not estimated.** The wireless stack overran
+upstream's 15872-byte on-chip instruction-RAM window by 28 bytes, so
+`IMEM_POLICY_DISABLE=1` had to be set from M4 onwards — see `M4-RADIO.md`. That
+drops their hot-path optimisation and **costs about 15 % of TX throughput and
+3 % of RX**. The second column is what the current image actually does.
+
+Getting it back means trimming `scripts/imem/policies/6.18.45.tsv` by ~28 bytes
+of functions rather than disabling the policy wholesale. That is a real, bounded
+piece of work and it is not done.
 
 On a 100 Mbit link that is ~94 % of line rate inbound and ~86 % outbound, with
 essentially no loss. The asymmetry matches upstream's own figures for this
