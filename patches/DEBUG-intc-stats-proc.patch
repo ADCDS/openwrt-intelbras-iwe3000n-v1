@@ -1,0 +1,73 @@
+irqchip: rtl819x: debug -- expose the intc flight recorder via /proc
+
+Temporary debug instrumentation for the softirq-storm investigation. The
+rtl819x irqchip driver already keeps rtl819x_intc_stats (per-GIMR-bit dispatch
+counts, jiffies of last dispatch, chained-entry/empty counts) -- built for a
+prior "issue #99" storm investigation and still updated on every interrupt,
+but nothing currently reads it out. The watchdog driver used to (DESIGN.md /
+AUDIT.md: "the previous...implementation maintained a one-Hz flight recorder
+... collected...IRQ-controller...snapshots during panic"), but that was
+deliberately stripped from rtl819x_wdt.c in the v1.12 production rewrite,
+with an explicit note to "reintroduce diagnostics only in a separate debug
+build, not this driver."
+
+This adds that separate debug build: a read-only /proc/rtl819x_intc_stats
+that dumps entries/empty/ip7 and every nonzero per-bit count and last_seen_j,
+registered from a late_initcall (intc_of_init runs during arch_init_irq(),
+before procfs exists, so it cannot host this itself).
+
+Not intended to stay in the tree once the storm is identified.
+
+--- a/drivers/irqchip/irq-rtl819x.c
++++ b/drivers/irqchip/irq-rtl819x.c
+@@ -467,3 +467,50 @@
+ 
+ /* Register with kernel irqchip infrastructure */
+ IRQCHIP_DECLARE(rtl819x_intc, "realtek,rtl819x-intc", intc_of_init);
++
++/* ========================================================================== */
++/* Debug: /proc/rtl819x_intc_stats -- read out the issue #99 flight recorder */
++/* ========================================================================== */
++
++/*
++ * Temporary debug instrumentation, not part of the production driver. Reads
++ * back the rtl819x_intc_stats counters (see rtl819x_intc_stats.h) so a GISR
++ * storm can be identified from userspace by which GIMR bit's count is racing
++ * ahead of the others, without needing the watchdog's panic-record path
++ * (which the DESIGN.md audit deliberately keeps free of this kind of thing --
++ * "reintroduce diagnostics only in a separate debug build, not this driver").
++ *
++ * proc_create_single() is called from a late_initcall, not from intc_of_init:
++ * intc_of_init runs during arch_init_irq(), well before vfs_caches_init() sets
++ * up procfs, so a proc_create_single() call at that point has nothing to
++ * attach to.
++ */
++#include <linux/proc_fs.h>
++#include <linux/seq_file.h>
++
++static int rtl819x_intc_stats_show(struct seq_file *m, void *v)
++{
++	int i;
++
++	seq_printf(m, "entries %u\n", rtl819x_intc_stats.entries);
++	seq_printf(m, "empty   %u\n", rtl819x_intc_stats.empty);
++	seq_printf(m, "ip7     %u\n", rtl819x_intc_stats.ip7);
++	seq_printf(m, "jiffies %lu\n", jiffies);
++	for (i = 0; i < RTL819X_INTC_NR_LINES; i++) {
++		if (!rtl819x_intc_stats.count[i] &&
++		    !rtl819x_intc_stats.last_seen_j[i])
++			continue;
++		seq_printf(m, "bit %2d  count %10u  last_seen_j %10u\n", i,
++			   rtl819x_intc_stats.count[i],
++			   rtl819x_intc_stats.last_seen_j[i]);
++	}
++	return 0;
++}
++
++static int __init rtl819x_intc_stats_proc_init(void)
++{
++	proc_create_single("rtl819x_intc_stats", 0444, NULL,
++			   rtl819x_intc_stats_show);
++	return 0;
++}
++late_initcall(rtl819x_intc_stats_proc_init);

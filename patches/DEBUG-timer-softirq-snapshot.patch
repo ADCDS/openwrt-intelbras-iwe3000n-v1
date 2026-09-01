@@ -1,0 +1,166 @@
+clocksource: rtl819x: debug -- use the existing timer forensics functions
+
+Continuation of issue #99 (see docs/M5-AP.md). Discovered that
+kernel/time/timer.c already carries timer_get_running_fn()/
+timer_collect_pending_fns()/timer_wheel_stats(), built by earlier work on
+this exact bug for the watchdog panic notifier (drivers/watchdog/
+rtl819x_wdt.c) -- whose integration was since stripped out in the v1.12
+"production rewrite" per drivers/watchdog/DESIGN.md and AUDIT.md ("the
+previous...implementation maintained a one-Hz flight recorder...Reintroduce
+diagnostics only in a separate debug build, not this driver"). The functions
+themselves remain exported and declared in <linux/timer.h>.
+
+timer_wheel_stats()'s own doc comment states exactly what is needed here:
+"Discriminates the two softirq-storm shapes behind issue #99: a wheel that
+never catches up to jiffies (death spiral -- large @overdue) vs a softirq
+re-raised at line rate over a caught-up wheel (@overdue ~0)." Use it plus
+timer_get_running_fn() (non-NULL only if a callback is genuinely stuck
+@@ -20,9 +20,140 @@
+ #include <linux/interrupt.h>
+ #include <linux/of.h>
+ #include <linux/sched_clock.h>
++#include <linux/kernel_stat.h>	/* debug: kstat_softirqs_cpu(), issue #99 */
++#include <linux/proc_fs.h>	/* debug: /proc/rtl819x_debug_arm, issue #99 */
++#include <linux/seq_file.h>	/* debug: single_open()/seq_read(), issue #99 */
++#include <linux/uaccess.h>	/* debug: get_user(), issue #99 */
++#include <linux/timer.h>	/* debug: timer_wheel_stats() etc., issue #99 */
++#include <asm/irq_regs.h>	/* debug: get_irq_regs(), issue #99 */
+ 
+ #include "timer-of.h"
+ 
++/*
++ * Debug, issue #99 (softirq storm during AP start): every instrumented path
++ * (rtlwifi's ISR, the rtl819x intc dispatcher, mac80211's RX tasklet) goes
++ * completely silent before and during the storm, yet the softlockup watchdog
++ * still detects and reports it -- which only happens if the platform TIMER
++ * interrupt keeps firing normally throughout (the watchdog's own periodic
++ * hrtimer runs from exactly that hard-IRQ path). So this is the one place
++ * proven to still execute during the storm: print the kernel's own per-CPU
++ * softirq vector counts (already maintained by kernel/softirq.c, no new
++ * accounting needed) and the PC this timer interrupt preempted, which needs
++ * no /proc read and no live shell -- both are impossible while a single CPU
++ * is monopolized.
++ *
++ * Silent by default (rtl819x_debug_armed starts false): an earlier version
++ * of this patch printed unconditionally at a fixed tick interval and it
++ * flooded the console badly enough, competing with getty for the same UART,
++ * that a login prompt became unreadable and a blind "reboot" sent through it
++ * left the board silent for minutes -- a self-inflicted lockout distinct
++ * from the bug being hunted. Arm it deliberately, right before the specific
++ * test window, by writing "1" to /proc/rtl819x_debug_arm; write "0" (or
++ * just reboot) to go quiet again.
++ *
++ * Names match include/linux/interrupt.h's enum order (HI..RCU), stable
++ * across recent kernels. Not intended to stay in the tree once the storm is
++ * identified.
++ */
++bool rtl819x_debug_armed; /* not static: kernel/time/timer.c reads it too, issue #99 */
++
++static void rtl819x_debug_softirq_snapshot(void)
++{
++	static const char * const names[NR_SOFTIRQS] = {
++		"HI", "TIMER", "NET_TX", "NET_RX", "BLOCK",
++		"IRQ_POLL", "TASKLET", "SCHED", "HRTIMER", "RCU",
++	};
++	static unsigned int calls;
++	int i;
++
++	if (!rtl819x_debug_armed)
++		return;
++
++	/*
++	 * Separately from the once-per-50-ticks softirq snapshot below, sample
++	 * the PC this timer interrupt preempted every 10 ticks (finer grain --
++	 * want to see whether it is the SAME address every time, a genuine
++	 * tight loop, or scattered, which would point elsewhere). Both
++	 * intervals are far shorter than before the flooding incident because
++	 * this now only ever runs during a deliberately armed window, not for
++	 * the whole boot.
++	 */
++	/*
++	 * pr_emerg, not pr_info: console_loglevel was found at 5 at test time
++	 * (some earlier command in this session's history lowered it from the
++	 * loglevel=7 bootarg default), which silently drops KERN_INFO (6)
++	 * before it ever reaches the UART -- pr_cont continues at whatever
++	 * level started the line. This debug output needs to survive that
++	 * regardless of what userspace has done to console_loglevel.
++	 */
++	/*
++	 * Issue #99, latest turn: kernel/time/timer.c already carries
++	 * timer_get_running_fn()/timer_collect_pending_fns()/timer_wheel_stats()
++	 * -- built by earlier work on this exact bug for the watchdog panic
++	 * notifier (drivers/watchdog/rtl819x_wdt.c), whose integration was
++	 * since stripped in the v1.12 "production rewrite" (see
++	 * drivers/watchdog/DESIGN.md / AUDIT.md), but the functions themselves
++	 * are still exported and declared in <linux/timer.h>. Use them
++	 * directly instead of the ad-hoc PC/stack sampling that turned out to
++	 * flood the console: timer_wheel_stats()'s own doc comment says
++	 * exactly what this is for -- "discriminates the two softirq-storm
++	 * shapes behind issue #99: a wheel that never catches up to jiffies
++	 * (death spiral -- large @overdue) vs a softirq re-raised at line rate
++	 * over a caught-up wheel (@overdue ~0)". One short line, not a flood.
++	 */
++	if (++calls % 400)
++		return;
++
++	{
++		unsigned long overdue;
++		unsigned int nr_pending;
++		extern unsigned long rtl819x_debug_run_timer_softirq_calls;
++
++		timer_wheel_stats(&overdue, &nr_pending);
++		pr_emerg("issue99: j=%lu pending=0x%02lx running=%pS overdue=%lu nr=%u rtscalls=%lu\n",
++			 jiffies, local_softirq_pending(),
++			 timer_get_running_fn(), overdue, nr_pending,
++			 rtl819x_debug_run_timer_softirq_calls);
++	}
++}
++
++static ssize_t rtl819x_debug_arm_write(struct file *f, const char __user *buf,
++				       size_t count, loff_t *ppos)
++{
++	char c;
++
++	if (count < 1 || get_user(c, buf))
++		return -EFAULT;
++	rtl819x_debug_armed = (c == '1');
++	return count;
++}
++
++static int rtl819x_debug_arm_show(struct seq_file *m, void *v)
++{
++	seq_printf(m, "%d\n", rtl819x_debug_armed);
++	return 0;
++}
++
++static int rtl819x_debug_arm_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, rtl819x_debug_arm_show, NULL);
++}
++
++static const struct proc_ops rtl819x_debug_arm_fops = {
++	.proc_open	= rtl819x_debug_arm_open,
++	.proc_read	= seq_read,
++	.proc_write	= rtl819x_debug_arm_write,
++	.proc_lseek	= seq_lseek,
++	.proc_release	= single_release,
++};
++
++static int __init rtl819x_debug_arm_proc_init(void)
++{
++	proc_create("rtl819x_debug_arm", 0644, NULL, &rtl819x_debug_arm_fops);
++	return 0;
++}
++late_initcall(rtl819x_debug_arm_proc_init);
++
+ #define DRV_VERSION "1.3"
+ 
+ #define REALTEK_TC_REG_DATA0		0x00
+@@ -276,6 +407,7 @@
+ 		ir |= REALTEK_TC_IR_TC0_PENDING;
+ 		tc_w32(ir, REALTEK_TC_REG_IR);
+ 	}
++	rtl819x_debug_softirq_snapshot();
+ 	if (likely(ced && ced->event_handler))
+ 		ced->event_handler(ced);
+ 	return IRQ_HANDLED;

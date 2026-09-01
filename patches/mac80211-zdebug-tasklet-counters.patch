@@ -1,0 +1,87 @@
+mac80211: debug -- count tasklet runs/reschedules and frame flow
+
+Temporary debug instrumentation for the issue #99 softirq-storm continuation
+(see docs/M5-AP.md). The RX tasklet is now budget-bounded
+(mac80211-bound-rx-tasklet.patch), but a softirq storm with an identical
+signature (100% softirq, 0% hardirq, stuck at handle_softirqs/
+arch_local_irq_enable) still reproduces during AP start, and the rtl819x intc
+flight recorder (DEBUG-intc-stats-proc.patch) shows GISR bit 21 (the PCIe
+line, i.e. every source rtl_pci's ISR can report) goes completely silent
+partway through -- no further hardware interrupt of any kind fires once the
+storm begins. So whatever is spinning is not waiting on new hardware; either
+the bounded tasklet is being kept perpetually non-empty by something that
+resupplies its queue without a new hardirq (a self-sustaining software loop),
+or something else entirely is looping.
+
+Adds four counters -- tasklet_runs, tasklet_reschedules, frames_processed
+(dequeued in __ieee80211_handle_queued_frames), frames_queued (enqueued in
+ieee80211_rx_irqsafe) -- and a /proc/mac80211_tasklet_debug reader. If
+frames_queued keeps climbing after rtl_pci's hardirq has gone silent, something
+inside the RX/TX-status handling path is regenerating its own input. If it
+does not, the storm is elsewhere and this patch is a (cheap) negative result.
+
+Not intended to stay in the tree once the storm is identified.
+
+--- a/net/mac80211/main.c
++++ b/net/mac80211/main.c
+@@ -444,6 +444,16 @@
+  * everything". Returns true if the queues were emptied, false if the budget
+  * ran out with frames possibly still queued.
+  */
++/*
++ * Debug counters, issue #99 continuation (softirq storm during AP start).
++ * Not part of the production driver -- see the /proc reader appended at the
++ * end of this file. Plain globals: main.c and rx.c both link into mac80211.ko.
++ */
++unsigned long mac80211_dbg_tasklet_runs;
++unsigned long mac80211_dbg_tasklet_reschedules;
++unsigned long mac80211_dbg_frames_processed;
++unsigned long mac80211_dbg_frames_queued;
++
+ static bool __ieee80211_handle_queued_frames(struct ieee80211_local *local,
+ 					     unsigned int budget)
+ {
+@@ -451,6 +461,7 @@
+ 
+ 	while ((skb = skb_dequeue(&local->skb_queue)) ||
+ 	       (skb = skb_dequeue(&local->skb_queue_unreliable))) {
++		mac80211_dbg_frames_processed++;
+ 		switch (skb->pkt_type) {
+ 		case IEEE80211_RX_MSG:
+ 			/* Clear skb->pkt_type in order to not confuse kernel
+@@ -496,10 +507,34 @@
+ {
+ 	struct ieee80211_local *local = from_tasklet(local, t, tasklet);
+ 
++	mac80211_dbg_tasklet_runs++;
+ 	if (!__ieee80211_handle_queued_frames(local,
+-					      IEEE80211_RX_TASKLET_BUDGET))
++					      IEEE80211_RX_TASKLET_BUDGET)) {
++		mac80211_dbg_tasklet_reschedules++;
+ 		tasklet_schedule(&local->tasklet);
++	}
++}
++
++#include <linux/proc_fs.h>
++#include <linux/seq_file.h>
++
++static int mac80211_tasklet_debug_show(struct seq_file *m, void *v)
++{
++	seq_printf(m, "jiffies            %lu\n", jiffies);
++	seq_printf(m, "tasklet_runs       %lu\n", mac80211_dbg_tasklet_runs);
++	seq_printf(m, "tasklet_reschedules %lu\n", mac80211_dbg_tasklet_reschedules);
++	seq_printf(m, "frames_processed   %lu\n", mac80211_dbg_frames_processed);
++	seq_printf(m, "frames_queued      %lu\n", mac80211_dbg_frames_queued);
++	return 0;
++}
++
++static int __init mac80211_tasklet_debug_proc_init(void)
++{
++	proc_create_single("mac80211_tasklet_debug", 0444, NULL,
++			   mac80211_tasklet_debug_show);
++	return 0;
+ }
++late_initcall(mac80211_tasklet_debug_proc_init);
+ 
+ static void ieee80211_restart_work(struct work_struct *work)
+ {

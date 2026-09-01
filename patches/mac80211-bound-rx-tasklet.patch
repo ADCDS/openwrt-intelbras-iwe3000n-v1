@@ -1,0 +1,82 @@
+mac80211: bound the RX tasklet so a slow CPU cannot livelock
+
+ieee80211_handle_queued_frames() drains local->skb_queue in an unbounded
+while-loop. From the tasklet that is a livelock waiting to happen: if frames
+arrive at least as fast as they are retired, the loop never exits, softirq
+processing never yields, and userspace never runs again.
+
+This board hits it every time. rtl_pci calls _rtl_pci_rx_interrupt() straight
+from the hard IRQ handler and processes up to a whole RX ring (512 entries in
+this tree) per interrupt, calling ieee80211_rx_irqsafe() for each frame -- so
+frames land on the queue in large bursts from hard IRQ context, while this
+tasklet retires them one at a time on a 400 MHz single-core MIPS. Bringing an
+AP up on a busy 2.4 GHz channel wedges the box within seconds:
+
+  watchdog: BUG: soft lockup - CPU#0 stuck for 23s! [hostapd:55]
+  #1: 0% system, 100% softirq, 0% hardirq, 0% idle
+  epc : arch_local_irq_enable+0x14/0x24
+  ra  : handle_softirqs+0x9c/0x2e8
+
+Give the tasklet path a budget: retire at most 64 frames, then reschedule and
+return so other softirqs and userspace get the CPU. Throughput is unchanged --
+the work still drains at full rate, just in bounded batches.
+
+ieee80211_handle_queued_frames() keeps its drain-everything semantics for
+ieee80211_stop_device(), which needs the queue actually emptied.
+
+--- a/net/mac80211/main.c
++++ b/net/mac80211/main.c
+@@ -439,7 +439,13 @@
+ }
+ 
+ /* context: requires softirqs disabled */
+-void ieee80211_handle_queued_frames(struct ieee80211_local *local)
++/*
++ * Process queued frames, at most @budget of them; @budget == 0 means "drain
++ * everything". Returns true if the queues were emptied, false if the budget
++ * ran out with frames possibly still queued.
++ */
++static bool __ieee80211_handle_queued_frames(struct ieee80211_local *local,
++					     unsigned int budget)
+ {
+ 	struct sk_buff *skb;
+ 
+@@ -462,14 +468,37 @@
+ 			dev_kfree_skb(skb);
+ 			break;
+ 		}
++
++		if (budget && --budget == 0)
++			return false;
+ 	}
++
++	return true;
++}
++
++void ieee80211_handle_queued_frames(struct ieee80211_local *local)
++{
++	__ieee80211_handle_queued_frames(local, 0);
+ }
+ 
++/*
++ * Frames per tasklet run before yielding. Draining the queue unbounded here
++ * livelocks a slow CPU: on a 400 MHz RTL8196E in AP mode the driver hands
++ * frames up from hard IRQ context (rtl_pci processes a whole 512-entry RX ring
++ * per interrupt) faster than this tasklet can retire them, so the loop never
++ * exits, softirq processing never yields, and the box wedges at 100% softirq
++ * until the softlockup watchdog panics it. Yield and reschedule instead: the
++ * work still drains at full rate, but userspace and other softirqs get to run.
++ */
++#define IEEE80211_RX_TASKLET_BUDGET	64
++
+ static void ieee80211_tasklet_handler(struct tasklet_struct *t)
+ {
+ 	struct ieee80211_local *local = from_tasklet(local, t, tasklet);
+ 
+-	ieee80211_handle_queued_frames(local);
++	if (!__ieee80211_handle_queued_frames(local,
++					      IEEE80211_RX_TASKLET_BUDGET))
++		tasklet_schedule(&local->tasklet);
+ }
+ 
+ static void ieee80211_restart_work(struct work_struct *work)

@@ -332,7 +332,7 @@ them improves cold-boot training; that needs a board on cold power to test.
 Practical consequence: **if `wlan0` is missing, power-cycle the board** (remove
 power, don't `reboot`). A warm reboot cannot clear it.
 
-## Board state (current)
+## Board state (historical — superseded by "Board state (current)" below)
 
 The board runs the tree as committed: baseline `pci-rtl819x.c` plus the RX
 refill fix. It boots cleanly, `eth0` is up, and it is recoverable via the
@@ -341,7 +341,7 @@ loader's TFTP at the kernel burn address `0x00010000`. `mtd0` untouched.
 The endpoint is currently wedged from the debugging session, so `wlan0` is absent
 until the board is cold power-cycled.
 
-## What to do next
+## What to do next (historical — the softirq livelock below is what this pointed to)
 
 - **Cold power-cycle the board**, then confirm `LTSSM 0x11` / `wlan0` present.
 - Re-run hostapd and confirm the corruption stays gone over a long run, then
@@ -354,3 +354,131 @@ until the board is cold power-cycled.
   chasing it.
 - If the link proves flaky from cold too, the three mitigations above are the
   place to start — but measure each against a *cold* boot, not a warm one.
+
+## Update: the softirq livelock is a stopped TIMER_SOFTIRQ, not an RX/TX hang
+
+The livelock above is real, reproduces on every hostapd AP start (right after
+`wlan0: interface state UNINITIALIZED->COUNTRY_UPDATE`), regardless of whether
+the PCIe link is healthy this boot or not, and regardless of every RX/TX fix in
+this document. It is **not explained by anything in rtlwifi or mac80211's own
+code** — this took several rounds of instrumentation to pin down, including one
+false lead worth recording so it isn't retried.
+
+**False lead: `NET_TX` frozen at 1.** An early instrumentation pass (per-CPU
+`kstat_softirqs_cpu()` snapshots) showed every softirq vector's dispatch count
+flat except `NET_TX_SOFTIRQ`, which read exactly 1 and never moved again. Since
+the kernel increments a vector's kstat count *before* calling its handler, "1
+and frozen" reads naturally as "`net_tx_action()` was entered once and never
+returned." `rtl_pci_tx()` was checked and is non-blocking, so the search moved
+into the qdisc/mac80211 xmit chain — a plausible-looking trail that turned out
+to be wrong.
+
+**What actually happens (found in three steps once the console-flooding trap
+below was cleared):**
+
+1. `local_softirq_pending()` shows bit `0x02` (`TIMER_SOFTIRQ`) permanently set
+   from the moment the freeze starts.
+2. `kernel/time/timer.c` already carries `timer_get_running_fn()`,
+   `timer_collect_pending_fns()`, and `timer_wheel_stats()` — built by earlier
+   work on this exact bug (see the `issue #99` comments at
+   `kernel/time/timer.c:1346-1408` and `:1410-1451`) for the watchdog's panic
+   notifier, whose integration was later stripped in the `rtl819x-wdt` v1.12
+   "production rewrite" (`drivers/watchdog/DESIGN.md` /`AUDIT.md`: "reintroduce
+   diagnostics only in a separate debug build, not this driver") — but the
+   functions themselves stayed exported. Calling `timer_wheel_stats()` from an
+   armed debug probe shows `running=NULL` (nothing hung mid-callback) while
+   `overdue` (how far `jiffies` has outrun the wheel's `next_expiry`) climbs
+   **unbounded** for as long as the freeze lasts: 43, 499, 1336, 2706, 5206,
+   8277, 11329... jiffies at roughly the normal `HZ=250` rate, wheel not
+   advancing at all. `timer_wheel_stats()`'s own doc comment names this exact
+   shape "a wheel that never catches up to jiffies (death spiral)".
+3. A one-line counter added to the top of `run_timer_softirq()` itself
+   (`rtl819x_debug_run_timer_softirq_calls`, printed as `rtscalls`) settles it:
+   the count is **frozen at the exact value it held when the freeze began** —
+   530, in one full run; 532 in another — for the entire rest of the run (60+
+   seconds observed), reproduced twice. `run_timer_softirq()` — `TIMER_SOFTIRQ`'s
+   own handler — is **never invoked again**, even once, despite the softirq
+   showing pending on every sample.
+
+So this is not a hung timer callback (ruled out three separate ways: the
+rtlwifi 2 s watchdog is non-blocking by inspection; mac80211's `sta_cleanup`
+and `dynamic_ps_timer` are both no-ops or non-blocking with zero stations; the
+generic netdev `dev_watchdog` is never armed at all, since `netdev_watchdog_up()`
+returns immediately when `.ndo_tx_timeout` is `NULL`, which mac80211's
+`ieee80211_dataif_ops` doesn't set). A companion patch printing every
+`call_timer_fn()` invocation independently confirms this: several distinct
+timers (`tcp_orphan_update`, `entropy_timer`, `blk_rq_timed_out_timer`, ...) fire
+and return cleanly, right up to the same moment, then **none ever fire again**.
+
+The bug is upstream of all of that: `handle_softirqs()` sees `TIMER_SOFTIRQ`
+marked pending but stops actually dispatching it. Every PC sample taken by a
+timer-ISR-based probe during the freeze — dozens of samples, two independent
+runs — lands at the exact same instruction: `arch_local_irq_enable+0x14/0x24`,
+called from `handle_softirqs+0x9c/0x2e8` (matching the watchdog's own panic
+traces from the very first reproduction, before any of this session's
+instrumentation existed, so this part of the signature is not an artifact of
+the debug patches). `handle_softirqs()`'s own inline retry is bounded
+(`MAX_SOFTIRQ_RESTART`, `time_before(jiffies, end)`) and hands off any
+remaining work to `wakeup_softirqd()` — a real kernel thread, which needs the
+scheduler to actually run it. This kernel is `CONFIG_PREEMPT_NONE=y`: nothing
+forces a reschedule mid-kernel-context; a task only gets picked up at an
+explicit `schedule()`/`cond_resched()` or a return-to-userspace boundary. The
+leading hypothesis — **not yet proven** — is that `ksoftirqd` gets woken but
+never actually scheduled, because whatever loop this CPU is in (hardirq exit →
+softirq check → hardirq exit → ...) never reaches a point that yields, so
+nothing else — not `ksoftirqd`, not hostapd, not a login shell — ever runs
+again. This matches every other symptom already on record: the shell becomes
+completely unresponsive for the duration (confirmed repeatedly — a `reboot`
+typed into a live session during the freeze has no effect at all), yet the
+platform timer hardirq keeps firing at a normal rate throughout (confirmed via
+a probe *inside* that hardirq handler, which keeps printing on schedule).
+
+**Debug-only patches added for this (all temporary, none meant to stay in the
+tree once the mechanism above is confirmed and fixed):**
+`DEBUG-intc-stats-proc.patch`, `DEBUG-timer-softirq-snapshot.patch`
+(timer-ISR probe: PC sample + `timer_wheel_stats()`/`timer_get_running_fn()`,
+gated behind writing `1` to `/proc/rtl819x_debug_arm` so it stays silent
+outside a deliberately armed test window — an earlier, unconditionally-verbose
+version of this same probe flooded the console badly enough over the board's
+slow, character-at-a-time 38400 baud serial console that
+`console_unlock()`/`vprintk_emit()` themselves briefly became indistinguishable
+from the bug being hunted; keep any future revival of this probe terse),
+`DEBUG-timer-callback-trace.patch` (prints every `call_timer_fn()` invocation),
+`mac80211-zdebug-tasklet-counters.patch` / `mac80211-zdebug-rx-irqsafe-counter.patch`
+(ruled out mac80211's own RX tasklet — never scheduled during the freeze,
+so not the cause either).
+
+## Board state (current)
+
+The board runs the committed RX-refill fix and mac80211 tasklet budget, plus
+the debug-only patches above (all gated behind `/proc/rtl819x_debug_arm`,
+default off, so they don't affect normal boots). `eth0` is up, recoverable via
+the loader's TFTP at `0x00010000`, `mtd0` untouched. `wlan0` trains reliably on
+a fresh boot in current testing.
+
+Router power is switched by a Tuya smart plug (`tomada` script, local LAN
+protocol, no cloud) — this makes recovering from the freeze (which leaves the
+shell fully unresponsive; only a real power cycle clears it, same as the PCIe
+wedge above) a self-serve loop instead of needing a manual power cycle each
+time.
+
+## What to do next
+
+- **M5 is still not met**: no client has associated and passed traffic. The
+  freeze happens before hostapd ever finishes bringing the AP up, so this has
+  to be fixed first.
+- Confirm the `ksoftirqd`-never-scheduled hypothesis directly: instrument (or
+  check via existing tracepoints) whether `wakeup_softirqd()` is actually
+  called during the freeze, and whether `ksoftirqd`'s task state ever leaves
+  `TASK_RUNNING`-but-not-on-CPU. If confirmed, the fix is almost certainly
+  making `handle_softirqs()`'s dispatch not depend on a scheduler handoff that
+  this `PREEMPT_NONE` platform can't deliver here — e.g. tracking down what in
+  hostapd's AP-start path prevents the CPU from ever reaching a `schedule()`
+  point (an uninterruptible busy-wait somewhere in the call chain triggered by
+  `COUNTRY_UPDATE`/AP start is the next thing to find; it has not been
+  identified yet).
+- Once fixed: re-run hostapd for a long sustained AP session (both the RX
+  corruption fix and this need re-confirming together), then get a real client
+  to associate.
+- Remove the debug-only patches listed above once the mechanism is fixed and
+  confirmed — they're marked as such in their own patch headers.

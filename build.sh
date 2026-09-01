@@ -110,6 +110,31 @@ PY
     install -Dm644 "$HERE/patches/rtlwifi-rx-refill-before-hw-release.patch" \
                    "$KDIR/patches-6.18/rtlwifi-rx-refill-before-hw-release.patch"
 
+    echo "==> mac80211 RX tasklet budget (softirq livelock fix)"
+    install -Dm644 "$HERE/patches/mac80211-bound-rx-tasklet.patch" \
+                   "$KDIR/patches-6.18/mac80211-bound-rx-tasklet.patch"
+
+    echo "==> [DEBUG] mac80211 tasklet/frame-flow counters -- issue #99"
+    # Named mac80211-zdebug-* (not DEBUG-*) on purpose: patches-6.18/*.patch
+    # applies in alphabetical glob order, and it must land AFTER
+    # mac80211-bound-rx-tasklet.patch, whose changes it depends on -- an
+    # uppercase "DEBUG-" prefix sorts before every lowercase patch name here
+    # and applied too early, failing with hunk mismatches.
+    install -Dm644 "$HERE/patches/mac80211-zdebug-tasklet-counters.patch" \
+                   "$KDIR/patches-6.18/mac80211-zdebug-tasklet-counters.patch"
+    install -Dm644 "$HERE/patches/mac80211-zdebug-rx-irqsafe-counter.patch" \
+                   "$KDIR/patches-6.18/mac80211-zdebug-rx-irqsafe-counter.patch"
+
+    echo "==> [DEBUG] timer_list callback trace -- issue #99"
+    # Re-enabled: its own volume (2 lines per callback INVOCATION, and only
+    # a handful of distinct timer_list callbacks fire at all on this board)
+    # turned out to be low -- the actual flood was the OTHER probe's 48-line
+    # stack scan on top of this, now removed. This patch's data was useful:
+    # it proved callbacks run and return cleanly, and confirmed zero fire at
+    # all once the freeze begins.
+    install -Dm644 "$HERE/patches/DEBUG-timer-callback-trace.patch" \
+                   "$KDIR/patches-6.18/DEBUG-timer-callback-trace.patch"
+
     echo "==> [3b'\''] rtl819x intc must route the PCIe interrupt"
     # jnilo1's intc ships IRR2=0 (no PCIe); without routing GIMR bit 21 to a CPU
     # IP line the RTL8192EE's INTA never reaches the CPU and the radio is silent.
@@ -126,6 +151,29 @@ PY
         patch -p1 -f --no-backup-if-mismatch -d "$f" \
               < "$HERE/patches/irqchip-rtl819x-route-pcie.patch" \
             || { echo "ERROR: irqchip-rtl819x-route-pcie.patch failed on files-6.18" >&2; exit 1; }
+    fi
+
+    echo "==> [DEBUG] /proc/rtl819x_intc_stats -- issue #99 storm diagnosis"
+    # Temporary: not meant to stay in the tree. Same in-place/idempotent
+    # treatment as the PCIe routing patch above, and for the same reason
+    # (overlay file, not present yet at patches-6.18 time).
+    if grep -q rtl819x_intc_stats_proc_init "$intc"; then
+        echo "    already applied"
+    else
+        patch -p1 -f --no-backup-if-mismatch -d "$f" \
+              < "$HERE/patches/DEBUG-intc-stats-proc.patch" \
+            || { echo "ERROR: DEBUG-intc-stats-proc.patch failed on files-6.18" >&2; exit 1; }
+    fi
+
+    echo "==> [DEBUG] timer-ISR softirq-vector snapshot -- issue #99 storm diagnosis"
+    # Same in-place/idempotent overlay-file treatment, same reason.
+    local timerc="$f/drivers/clocksource/timer-rtl819x.c"
+    if grep -q rtl819x_debug_softirq_snapshot "$timerc"; then
+        echo "    already applied"
+    else
+        patch -p1 -f --no-backup-if-mismatch -d "$f" \
+              < "$HERE/patches/DEBUG-timer-softirq-snapshot.patch" \
+            || { echo "ERROR: DEBUG-timer-softirq-snapshot.patch failed on files-6.18" >&2; exit 1; }
     fi
 
     echo "==> [3c] SOC_RTL8196E must select HAVE_PCI + PCI_DRIVERS_GENERIC"

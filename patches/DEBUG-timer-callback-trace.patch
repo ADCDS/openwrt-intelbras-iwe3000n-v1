@@ -1,0 +1,84 @@
+timer: debug -- print every timer_list callback about to run
+
+Continuation of the issue #99 investigation (see docs/M5-AP.md and
+DEBUG-timer-softirq-snapshot.patch). During the AP-start softirq freeze,
+TIMER_SOFTIRQ shows as pending (local_softirq_pending() bit 0x02) with its
+kstat_softirqs_cpu() dispatch count frozen -- consistent with something inside
+run_timer_softirq()'s per-timer dispatch (call_timer_fn) hanging mid-call and
+never returning, freezing the whole softirq's completion.
+
+Every driver-level candidate checked out clean by reading the source:
+rtlwifi's one and only timer_list (the 2s watchdog, just queue_delayed_work +
+mod_timer, non-blocking), mac80211's sta_cleanup (no-op with zero stations)
+and dynamic_ps_timer (just wiphy_work_queue), and the generic netdev TX-hang
+watchdog (net/sched/sch_generic.c's netdev_watchdog_up() returns immediately
+without arming when ndo_tx_timeout is NULL -- and mac80211's
+ieee80211_dataif_ops does not set it). None of them explain a hang.
+
+Rather than keep guessing from source alone, print every timer_list callback
+immediately before AND after it runs, gated on the same rtl819x_debug_armed
+flag as the timer-ISR probe so it stays silent outside a deliberately armed
+test window (write "1" to /proc/rtl819x_debug_arm first). Whichever callback
+prints "fn=..." without a matching "returned" line is the one that hung.
+
+Not intended to stay in the tree once the storm is identified.
+
+--- a/kernel/time/timer.c
+@@ -1744,9 +1744,28 @@
+ 	 */
+ 	lock_map_acquire(&lockdep_map);
+ 
++	/*
++	 * Debug, issue #99: identify which timer_list callback a stuck
++	 * TIMER_SOFTIRQ dispatch (pending bit set, kstat count frozen) is
++	 * hanging inside. Every candidate found by reading rtlwifi/mac80211/
++	 * cfg80211 source (the rtlwifi 2s watchdog, mac80211's sta_cleanup and
++	 * dynamic_ps timers, the generic netdev dev_watchdog) checked out as
++	 * either non-blocking or, for dev_watchdog, never armed at all (mac80211
++	 * does not set .ndo_tx_timeout, and netdev_watchdog_up() returns early
++	 * without arming when that is NULL). Rather than keep guessing, print
++	 * every callback about to run, gated on the same arm/disarm flag as
++	 * the timer-ISR probe (see drivers/clocksource/timer-rtl819x.c) so
++	 * this stays silent outside the deliberate test window.
++	 */
++	extern bool rtl819x_debug_armed;
++	if (rtl819x_debug_armed)
++		pr_emerg("issue99: timer fn=%pS\n", fn);
++
+ 	trace_timer_expire_entry(timer, baseclk);
+ 	fn(timer);
+ 	trace_timer_expire_exit(timer);
++	if (rtl819x_debug_armed)
++		pr_emerg("issue99: timer fn=%pS returned\n", fn);
+ 
+ 	lock_map_release(&lockdep_map);
+ 
+@@ -2395,10 +2414,28 @@
+ }
+ 
+ /*
++ * Debug, issue #99: does run_timer_softirq() (TIMER_SOFTIRQ's h->action())
++ * ever get INVOKED AT ALL during the freeze, or does handle_softirqs()'s own
++ * dispatch never reach it despite local_softirq_pending() showing the bit
++ * set? timer_wheel_stats() (see kernel/time/timer.c's other issue #99
++ * comments) already proved the wheel enters a "death spiral" -- overdue
++ * climbing unbounded, base->running_timer staying NULL -- but that is
++ * consistent with EITHER this function never running, OR running but
++ * getting nowhere inside __run_timers(). A bare call counter distinguishes
++ * the two: if it stops advancing while local_softirq_pending() keeps
++ * showing TIMER_SOFTIRQ set, this function is never entered at all, and the
++ * bug is in handle_softirqs()'s dispatch, not anywhere in this file's own
++ * wheel-walking logic.
++ */
++unsigned long rtl819x_debug_run_timer_softirq_calls;
++
++/*
+  * This function runs timers and the timer-tq in bottom half context.
+  */
+ static __latent_entropy void run_timer_softirq(void)
+ {
++	rtl819x_debug_run_timer_softirq_calls++;
++
+ 	run_timer_base(BASE_LOCAL);
+ 	if (IS_ENABLED(CONFIG_NO_HZ_COMMON)) {
+ 		run_timer_base(BASE_GLOBAL);
