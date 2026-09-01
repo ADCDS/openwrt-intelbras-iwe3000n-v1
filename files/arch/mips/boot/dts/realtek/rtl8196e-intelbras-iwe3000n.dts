@@ -107,14 +107,22 @@
 			 * 1028 KB kernel / 2.93 MB rootfs. A 6.18 kernel image is
 			 * 1408 KB, so the boundary has to move.
 			 */
+			/*
+			 * The boundary is 0x200000 because that is where the
+			 * rootfs tooling burns (33-Rootfs/build_rootfs.sh
+			 * passes -b 0x200000) and matching it costs nothing.
+			 * It also leaves the kernel more room: the 6.18 image
+			 * with CONFIG_PCI is 1480 KiB, so 1984 KiB is 75%
+			 * used rather than 89%.
+			 */
 			partition@10000 {
 				label = "kernel";
-				reg = <0x010000 0x1A0000>;	/* 1664 KB, 85% used */
+				reg = <0x010000 0x1F0000>;	/* 1984 KB */
 			};
 
-			partition@1b0000 {
+			partition@200000 {
 				label = "rootfs";
-				reg = <0x1B0000 0x1E0000>;	/* 1920 KB */
+				reg = <0x200000 0x190000>;	/* 1600 KB */
 			};
 
 			partition@390000 {

@@ -1,0 +1,29 @@
+--- a/drivers/pci/controller/Kconfig
++++ b/drivers/pci/controller/Kconfig
+@@ -358,6 +358,18 @@
+ 	  Say 'Y' here if you want kernel support for the
+ 	  Xilinx Versal CPM host bridge.
+ 
++config PCIE_RTL819X
++	bool "Realtek RTL819x PCIe host controller"
++	depends on SOC_RTL8196E || COMPILE_TEST
++	depends on OF
++	help
++	  PCIe host bring-up for Realtek RTL819x SoCs, needed to reach the
++	  on-board RTL8192EE on boards that have one. Realtek's own stack
++	  does this inside the wireless driver instead.
++
++	  STAGE 1: trains the link and reads the downstream config header.
++	  It does not register a host bridge, so no devices are enumerated.
++
+ source "drivers/pci/controller/cadence/Kconfig"
+ source "drivers/pci/controller/dwc/Kconfig"
+ source "drivers/pci/controller/mobiveil/Kconfig"
+--- a/drivers/pci/controller/Makefile
++++ b/drivers/pci/controller/Makefile
+@@ -1,4 +1,5 @@
+ # SPDX-License-Identifier: GPL-2.0
++obj-$(CONFIG_PCIE_RTL819X) += pci-rtl819x.o
+ obj-$(CONFIG_PCIE_CADENCE) += cadence/
+ obj-$(CONFIG_PCI_FTPCI100) += pci-ftpci100.o
+ obj-$(CONFIG_PCI_IXP4XX) += pci-ixp4xx.o

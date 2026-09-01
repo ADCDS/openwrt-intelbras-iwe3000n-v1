@@ -87,25 +87,39 @@ PY
     grep -q "$DTS.dtb" "$mk" || \
         sed -i "/^obj-y/i dtb-\$(CONFIG_$BOARD_SYM)\t+= $DTS.dtb\n" "$mk"
 
-    echo "==> [3b] PCI controller Kconfig + Makefile"
-    local pk="$f/drivers/pci/controller/Kconfig" pm="$f/drivers/pci/controller/Makefile"
-    if [ ! -f "$pk" ]; then
-        # Upstream ships no PCI code at all, so these are new files that the
-        # kernel's own drivers/pci/controller/{Kconfig,Makefile} must include.
-        # Kept as fragments here; wiring them into the vanilla tree happens in
-        # cmd_kernel below, against the extracted source.
-        cat > "$pk" <<'EOK'
-config PCIE_RTL819X
-	bool "Realtek RTL819x PCIe host controller"
-	depends on PCI && (SOC_RTL8196E || COMPILE_TEST)
-	help
-	  PCIe host bring-up for Realtek RTL819x SoCs. Needed to reach the
-	  on-board RTL8192EE on boards that have one.
+    echo "==> [3b] PCI controller wiring (as a patch, NOT a file overlay)"
+    # These two files exist in the vanilla kernel and list every PCI controller
+    # driver there is. Dropping our own copies into files-6.18/ would REPLACE
+    # them -- which is exactly what an earlier version of this script did, and
+    # it silently deleted the entire upstream Kconfig from the build tree. Add
+    # to them with a patch instead; upstream applies patches-6.18/*.patch after
+    # extracting the tarball, and rejects any fuzz or offset.
+    install -Dm644 "$HERE/patches/drivers-pci-controller-rtl819x.patch" \
+                   "$KDIR/patches-6.18/drivers-pci-controller-rtl819x.patch"
 
-	  STAGE 1: trains the link and reads the config header. It does not
-	  register a host bridge yet, so no devices are enumerated.
-EOK
-        echo 'obj-$(CONFIG_PCIE_RTL819X) += pci-rtl819x.o' > "$pm"
+    echo "==> [3c] SOC_RTL8196E must select HAVE_PCI + PCI_DRIVERS_GENERIC"
+    # Upstream selects HW_HAS_PCI, which no longer gates anything: in 6.18
+    # drivers/pci/Kconfig has "menuconfig PCI ... depends on HAVE_PCI". Without
+    # this, CONFIG_PCI=y in the fragment is unsatisfiable and kconfig drops it
+    # without a word -- which is how the first build came out with no PCI at all.
+    #
+    # PCI_DRIVERS_GENERIC is the second half, and the build teaches it the hard
+    # way: without it MIPS defaults to PCI_DRIVERS_LEGACY (def_bool
+    # !PCI_DRIVERS_GENERIC), which pulls in arch/mips/pci/pci-legacy.c and that
+    # calls pcibios_plat_dev_init() -- a hook every legacy MIPS platform has to
+    # define and the realtek platform does not. The link fails with
+    # "undefined reference to `pcibios_plat_dev_init'".
+    #
+    # Defining a stub would work, but generic is the right answer: our host
+    # driver is a modern DT one, and PCI_DRIVERS_GENERIC is what
+    # devm_pci_alloc_host_bridge()/pci_host_probe() expect.
+    #
+    local rk="$f/arch/mips/realtek/Kconfig"
+    if ! grep -q "select HAVE_PCI" "$rk"; then
+        sed -i 's/^\(\t*\)select HW_HAS_PCI$/&\n\1select HAVE_PCI\n\1select PCI_DRIVERS_GENERIC/' "$rk"
+        grep -q "select PCI_DRIVERS_GENERIC" "$rk" && echo "    added" || die "could not add the PCI selects"
+    else
+        echo "    already present"
     fi
 
     echo "==> [4/4] BOARD map in upstream's build_kernel.sh"
@@ -115,6 +129,21 @@ EOK
         echo "    added iwe3000n"
     else
         echo "    already present"
+    fi
+
+    echo "==> [3d] cvimg burn address"
+    # Upstream builds the kernel image with CVIMG_BURN_ADDR=0x00020000, which is
+    # their 128 KiB boot partition. Ours is 64 KiB and the stock RealTek loader
+    # is told linuxpart=0x10000, so the kernel has to burn at 0x00010000. The
+    # burn address is baked into the cvimg header, and the loader's TFTP writes
+    # where the header says -- get this wrong and the image lands 64 KiB into
+    # the wrong place with no error.
+    local bkc="$KDIR/build_kernel.sh"
+    if grep -q 'CVIMG_BURN_ADDR="0x00020000"' "$bkc"; then
+        sed -i 's|CVIMG_BURN_ADDR="0x00020000"|CVIMG_BURN_ADDR="${CVIMG_BURN_ADDR:-0x00010000}"|' "$bkc"
+        echo "    kernel burn address -> 0x00010000"
+    else
+        echo "    already patched"
     fi
 
     echo "==> config fragment"
