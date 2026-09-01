@@ -1,0 +1,70 @@
+rtlwifi: mask the IRQ line while the ISR finds the driver disabled (issue #99)
+
+Follow-up to rtlwifi-zzfix-isr-quiesce-when-disabled. Clearing HISR in the
+irq_enabled == 0 path stops a stale level INTA, but not a live one: with real
+receive traffic every new frame re-asserts INTA, the cascade re-delivers it,
+and the process context that disabled interrupts and would re-enable them
+never runs again -- the CPU is in interrupt context at the RX rate. Seen on
+the RTL8196E AP the first time a phone (not the bench RT3070) joined: the
+timer-ISR probe reported a stuck softirq, the quiesce path kept clearing
+ROK|RDU|BCNDMAINT|TBDOK bits, the shell never came back.
+
+When the ISR fires while irq_enabled is false, disable_irq_nosync() its own
+line and remember that; enable_interrupt() re-enables it. Balanced by the flag,
+independent of how many times disable/enable pairs run. Applies after
+rtlwifi-zzfix-isr-quiesce-when-disabled (shares its hunks in pci.c).
+
+diff -Naur a/drivers/net/wireless/realtek/rtlwifi/pci.c b/drivers/net/wireless/realtek/rtlwifi/pci.c
+diff -Naur a/drivers/net/wireless/realtek/rtlwifi/pci.c b/drivers/net/wireless/realtek/rtlwifi/pci.c
+--- a/drivers/net/wireless/realtek/rtlwifi/pci.c	2026-09-01 18:51:19.325585641 -0300
++++ b/drivers/net/wireless/realtek/rtlwifi/pci.c	2026-09-01 18:51:19.373587342 -0300
+@@ -896,6 +896,20 @@
+ 				rtl_write_dword(rtlpriv, 0x00BC, hisre & ~intvec.intb);
+ 			rtl_pci_dbg.ne_cleared |= hisr;
+ 		}
++		/*
++		 * Clearing HISR is not enough while the chip keeps receiving:
++		 * every new frame re-asserts INTA, the cascade re-delivers it,
++		 * and with the driver disabled from process context the CPU
++		 * never leaves interrupt context long enough for that process
++		 * context to call enable_interrupt() -- a livelock at the RX
++		 * rate (seen when a phone joined the AP). Mask the line at the
++		 * interrupt controller until the driver re-enables; a level
++		 * INTA cannot storm through a masked line.
++		 */
++		if (!rtlpci->irq_masked_by_isr) {
++			rtlpci->irq_masked_by_isr = true;
++			disable_irq_nosync(rtlpci->pdev->irq);
++		}
+ 		return ret;
+ 	}
+ 
+diff -Naur a/drivers/net/wireless/realtek/rtlwifi/pci.h b/drivers/net/wireless/realtek/rtlwifi/pci.h
+--- a/drivers/net/wireless/realtek/rtlwifi/pci.h	2026-09-01 18:51:19.325585641 -0300
++++ b/drivers/net/wireless/realtek/rtlwifi/pci.h	2026-09-01 18:51:19.373587342 -0300
+@@ -151,6 +151,10 @@
+ struct rtl_pci {
+ 	struct pci_dev *pdev;
+ 	bool irq_enabled;
++	/* set by the ISR when it masked its own line at the interrupt
++	 * controller because it fired while irq_enabled was false; the next
++	 * enable_interrupt() unmasks and clears it. See _rtl_pci_interrupt(). */
++	bool irq_masked_by_isr;
+ 
+ 	bool driver_is_goingto_unload;
+ 	bool up_first_time;
+diff -Naur a/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/hw.c b/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/hw.c
+--- a/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/hw.c	2026-09-01 18:51:19.329585783 -0300
++++ b/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/hw.c	2026-09-01 18:51:19.373587342 -0300
+@@ -1591,6 +1591,11 @@
+ 	rtl_write_dword(rtlpriv, REG_HIMR, rtlpci->irq_mask[0] & 0xFFFFFFFF);
+ 	rtl_write_dword(rtlpriv, REG_HIMRE, rtlpci->irq_mask[1] & 0xFFFFFFFF);
+ 	rtlpci->irq_enabled = true;
++	/* undo the mask the ISR applied while we were disabled, if any */
++	if (rtlpci->irq_masked_by_isr) {
++		rtlpci->irq_masked_by_isr = false;
++		enable_irq(rtlpci->pdev->irq);
++	}
+ }
+ 
+ void rtl92ee_disable_interrupt(struct ieee80211_hw *hw)

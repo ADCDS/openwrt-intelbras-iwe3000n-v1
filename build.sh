@@ -101,6 +101,15 @@ PY
     install -Dm644 "$HERE/patches/drivers-pci-controller-rtl819x.patch" \
                    "$KDIR/patches-6.18/drivers-pci-controller-rtl819x.patch"
 
+    # This port owns every rtlwifi-*/mac80211-*/DEBUG-* patch in upstream's
+    # patches-6.18/. Remove them all first, then install the current set:
+    # upstream applies the whole directory in glob order, so a patch dropped
+    # from this script but left behind on disk keeps getting built in -- which
+    # happened, silently, for three experimental patches over several builds.
+    for stale in "$KDIR"/patches-6.18/rtlwifi-*.patch "$KDIR"/patches-6.18/mac80211-*.patch "$KDIR"/patches-6.18/DEBUG-*.patch; do
+        [ -e "$stale" ] && rm -f "$stale"
+    done
+
     echo "==> [3b'] rtlwifi efuse big-endian fix"
     # The RTL8196E is big-endian; mainline rtlwifi reads the little-endian efuse
     # with *(u16 *) casts, so the EEPROM ID magic 0x8129 is misread as 0x2981,
@@ -126,6 +135,10 @@ PY
     # rtlwifi-zzfix-* so it sorts after the zdebug counters it shares.
     install -Dm644 "$HERE/patches/rtlwifi-zzfix-isr-quiesce-when-disabled.patch" \
                    "$KDIR/patches-6.18/rtlwifi-zzfix-isr-quiesce-when-disabled.patch"
+
+    echo "==> rtlwifi: mask the IRQ line while the ISR finds the driver disabled -- issue #99 FIX 4"
+    install -Dm644 "$HERE/patches/rtlwifi-zzfix4-mask-irq-while-driver-disabled.patch" \
+                   "$KDIR/patches-6.18/rtlwifi-zzfix4-mask-irq-while-driver-disabled.patch"
 
     echo "==> mac80211 RX tasklet budget (softirq livelock fix)"
     install -Dm644 "$HERE/patches/mac80211-bound-rx-tasklet.patch" \

@@ -887,28 +887,93 @@ mechanism was never pinned down and they do not reproduce on the 64-ring
 kernel, so memory pressure in the TX path is the leading explanation, not a
 proven one.
 
+## Update: a phone joining wedged the AP again; and a build-recipe flaw that muddies earlier results
+
+**The recurrence.** With the 64-ring kernel up for 13 min and the RT3070 test
+done, a phone attempted to join and the board wedged. The timer-ISR probe
+(the auto-triggered one) caught it live: softirqs stuck, and the ISR's
+driver-disabled path — the storm fix — firing over and over, each time clearing
+fresh `HISR` bits (`ROK|RDU|BCNDMAINT0|TBDOK|TBDER`, accumulated
+`0x06110003`). That fix stops a *stale* level INTA; it cannot stop a *live*
+one: with a real client's frames arriving, every frame re-asserts INTA, the
+cascade re-delivers it, and the process context that had called
+`disable_interrupt()` never runs again to re-enable. Same livelock, at the RX
+rate. The bench RT3070 never provoked it; a phone's join did.
+
+Where the driver disables interrupts from process context on this chip:
+`rtl_pci_stop()`, `rtl_pci_disconnect()`, `rtl_ps_disable_nic()` — and, the
+ones that run while an AP is serving clients, `rtl92ee_set_beacon_interval()`
+and `rtl92ee_set_beacon_related_registers()` (from `bss_info_changed` when
+hostapd updates the beacon for a joining client's ERP/HT capabilities). Each
+brackets a few register writes with `disable_interrupt()` … `enable_interrupt()`;
+a burst of the joining client's frames inside that bracket is the trigger.
+
+Fix #4 (`rtlwifi-zzfix4-mask-irq-while-driver-disabled.patch`): when the ISR
+fires while `irq_enabled` is false, `disable_irq_nosync()` its own line and
+remember it; `enable_interrupt()` re-enables. A level INTA cannot storm through
+a line masked at the controller. Balanced by the flag, not by pairing.
+
+**The recipe flaw.** `build.sh` installs this port's patches into upstream's
+`patches-6.18/` but never removed ones it had stopped installing, and upstream
+applies that whole directory. Three experimental patches — the MACID
+media-status report (`zzfix2`), the MMIO read-back (`zzfix3`), and the TX
+latency stamps (`zzzdebug`) — stayed on disk and were built into every kernel
+from the moment each was first tried until now. Concretely: the kernel that
+passed the client test above contained ring-64 **plus zzfix2 and zzfix3**;
+"kernel A" contained zzfix2; the DMA-debug kernel contained all three. The
+committed recipe at `a8db83b` (no zzfix2/zzfix3) describes a configuration that
+had never been built. `build.sh` now deletes its own patch families from that
+directory before installing the current set. Consequences for the record:
+zzfix3 was condemned on "kernel B" evidence that is now confounded (B was
+also the first kernel to carry zzfix2... and memory pressure was unmeasured);
+zzfix2 may have contributed to the association success. Both are re-testable
+cleanly now, one at a time.
+
+**Clean configuration validated** (ring-64 + quiesce + fix #4, nothing else,
+fresh cold boot, MemFree 12.8 MiB at boot): the RT3070 authenticated (second
+try), associated (`AssocResp status=0 aid=1`), completed WPA2
+(`[AUTH][ASSOC][AUTHORIZED][WMM][HT]`) and pinged **20/20, 0% loss**; the
+storm probe stayed silent; MemFree 10.6 MiB with the client up. Neither zzfix2
+nor zzfix3 is needed; both stay out. (Two earlier "Not connected" results on
+this kernel were hostapd not having started — the `-B -f logfile` form does
+not produce a log on this build, and one start command never landed; test
+harness, not kernel.)
+
+**Boot flakiness, quantified from the console ring** (39 boots): 4 had a
+userspace fault before "System ready", all of the same shape —
+`do_page_fault(): sending SIGSEGV to mount for invalid read access` on rcS's
+very first command, ~4.7 s after power-on, with 12 MiB free and no wifi
+traffic yet. Memory pressure made this class of fault frequent; it is not its
+cause. The Lexra cache code's `flush_data_cache_page()` writes back and
+invalidates the D-cache only — nothing invalidates the I-cache when a page
+cache page is remapped executable, and `lexra_cache_init()` sets neither cache
+geometry nor alias flags, so the generic alias handling is off for an 8 KiB
+D-cache over 4 KiB pages. Instruction/data cache coherence on page reuse is the
+leading suspect; a power cycle clears it. Separate work item.
+
+
 ## Board state (current)
 
-Kernel: storm quiesce fix, RX refill fix, RX ring 64, plus the issue #99
-debug instrumentation (timer-ISR storm probe auto-triggered only on a stuck
-softirq; ISR counters; `/proc/rtl819x_debug_*` toggles, all default off).
-`eth0` up; hostapd `ENABLED`; a real client associates, authorizes and passes
-traffic; MemFree ~10.8 MiB with the AP and a client up. Kernel at
-`0x00010000`, rootfs and `mtd0` untouched, loader TFTP recovery as before.
-Router power on a `tomada`-switched plug.
+Kernel: storm quiesce (`zzfix`), IRQ-line mask while driver-disabled (`zzfix4`),
+RX refill fix, RX ring 64, plus the issue #99 debug instrumentation (all
+default-silent). `build.sh` now removes its own stale patches from upstream's
+`patches-6.18/` before installing, so a fresh clone builds what the recipe
+says. hostapd `ENABLED`; a real client associates, authorizes and passes
+traffic; MemFree ~10.6 MiB with a client up. Kernel at `0x00010000`, rootfs and
+`mtd0` untouched, loader TFTP recovery as before. No DHCP server on the board
+(busybox has `udhcpc` only) — clients need a static address in
+`192.168.50.0/24`, AP is `.1`.
 
 ## What to do next
 
-- Soak: an hour of client traffic, then repeated cold boots with association
-  each time (association was 1/1 on the 64-ring kernel; the flakiness before
-  was memory-driven and memory is now measured, but one run is one run).
-- The wifi MAC is different every boot (`00:e0:4c:81:92:xx`, last byte
-  random): the efuse MAC read is wrong in one byte. Cosmetic for a bench AP,
-  wrong for a product; look at `_rtl92ee_read_adapter_info()`.
-- The 1.3–1.9 s management-TX delays seen under memory pressure: either
-  reproduce on purpose (shrink RAM with `mem=`) and pin the mechanism, or
-  record them as resolved-by-consequence.
-- Then strip the issue #99 instrumentation (`DEBUG-*`, `*-zdebug-*`,
-  `/proc/rtl819x_debug_*`, `rtl_pci_dbg.h`) and turn the quiesce path into a
-  hal op for upstream; consider upstreaming the ring-size knob as a module
-  parameter.
+- A second client (a phone) joining is what exposed fix #4's bug; repeat that
+  on this kernel, with hostapd logging (`hostapd -dd -t conf >/tmp/h.log 2>&1 &`
+  — the `-f` form is inert here).
+- Boot flakiness (~10% of cold boots fault in rcS): test the I-cache
+  invalidation on exec-page remap and the D-cache alias flags in `c-lexra.c`,
+  measured as boot-fault rate over many boots.
+- Add a DHCP server to the rootfs (busybox `udhcpd`) so ordinary clients get an
+  address.
+- Soak; the wifi MAC's random last byte (efuse read); 23% loss at 1 pkt/s
+  (power-save shaped); then strip the issue #99 instrumentation and shape the
+  quiesce/mask fix as a hal op for upstream.
