@@ -1,5 +1,13 @@
 # Port plan — jnilo1/rtl8196e-gateway
 
+> **How it turned out** (2026-09-01). It fits, with the boundary moved: the
+> final layout is kernel `0x010000`–`0x200000` (1984 KiB) and rootfs
+> `0x200000`–`0x390000` (1600 KiB), because the kernel grew to ~1.8 MB once the
+> wireless stack and its firmware were built in ([`M6-FLASH-BUDGET.md`](M6-FLASH-BUDGET.md)).
+> The "no Wi-Fi" cost below did not materialise — see [`WIFI-PLAN.md`](WIFI-PLAN.md).
+> The load address question resolved itself: the loader stages the image where
+> the `cvimg` header says and jumps there.
+
 Route chosen 2026-08-31. This document answers the question `FEASIBILITY.md`
 listed as unmeasured — **does it fit 4 MB** — and it does, with room.
 
@@ -57,7 +65,7 @@ with this unit's MAC and RF calibration, and nothing can regenerate them. That
 looked like a blocker and is not: their kernel image is packaged with the
 **`cvimg` Realtek header**, and `kernel-6.18.img` begins `63 73 36 63` — `cs6c`,
 byte-for-byte the same magic as the Intelbras factory image in
-[`../../iwe3000n-firmware/vendor/`](../../iwe3000n-firmware/vendor/). **The stock
+Intelbras's 0.8.6 image (see [`RECOVERY.md`](RECOVERY.md)). **The stock
 loader already knows how to boot this format.** Their bootloader is a
 convenience (cleaner output, TFTP percentage, reboot-to-bootloader from Linux),
 not a dependency.

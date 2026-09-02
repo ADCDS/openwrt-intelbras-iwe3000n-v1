@@ -92,7 +92,7 @@
 			/*
 			 * ⚠ 64 KB, read-only, and it must stay that way. Besides the
 			 * bootloader this holds the H601 factory block at 0x6000 --
-			 * two copies of the MAC (D8:77:8B:3F:E2:01) and what looks
+			 * two copies of the MAC (D8:77:8B:xx:xx:xx) and what looks
 			 * like per-channel TX power calibration. There is no separate
 			 * MAC partition on this board and nothing can regenerate it.
 			 */

@@ -8,18 +8,24 @@
 # files-6.18/arch/mips/boot/dts/realtek/Makefile documents for adding a board,
 # plus the PCIe host driver this board needs for its radio.
 #
-#   ./build.sh deps     build the toolchain docker image (~45 min, ~8 GB)
+#   ./build.sh deps     clone upstream (pinned), build the toolchain docker image (~45 min, ~8 GB)
 #   ./build.sh overlay  apply this port's files to the upstream tree
 #   ./build.sh kernel   overlay, then build the kernel in docker
-#   ./build.sh rootfs   fix the /etc symlinks, then build the squashfs
+#   ./build.sh rootfs   fix the /etc symlinks, add the AP, then build the squashfs
+#   ./build.sh release  kernel + rootfs, then copy both to out/ with checksums
 #   ./build.sh shell    a shell in the builder container
 #
 # Nothing here writes to the device. Flashing is a separate, deliberate step —
-# and see ../iwe3000n-firmware/RESTORE-TO-STOCK.md before any of it.
+# docs/INSTALL.md — and read docs/RECOVERY.md before any of it.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UP="$HERE/rtl8196e-gateway"
+# Upstream is pinned. Their build applies every patch in patches-6.18/ and
+# rejects fuzz, so a newer upstream can break this recipe silently; bump the
+# pin deliberately, rebuild, re-test on hardware, then commit.
+UPSTREAM_URL=https://github.com/jnilo1/rtl8196e-gateway.git
+UPSTREAM_REV="${UPSTREAM_REV:-v4.2.0}"      # d2eb4b8912b2f60a26b48ad62692fb9cec427623
 KDIR="$UP/3-Main-SoC-Realtek-RTL8196E/32-Kernel"
 IMG=rtl8196e-gateway-builder
 BOARD_SYM=DTB_RTL8196E_IWE3000N
@@ -28,7 +34,17 @@ DTS=rtl8196e-intelbras-iwe3000n
 die() { echo "error: $*" >&2; exit 1; }
 
 need_upstream() {
-    [ -d "$UP" ] || die "upstream missing. git clone https://github.com/jnilo1/rtl8196e-gateway.git '$UP'"
+    if [ ! -d "$UP/.git" ]; then
+        echo "==> cloning upstream $UPSTREAM_URL at $UPSTREAM_REV"
+        git clone --no-checkout "$UPSTREAM_URL" "$UP"
+        git -C "$UP" checkout -q "$UPSTREAM_REV"
+    fi
+    local want have
+    want=$(git -C "$UP" rev-parse "$UPSTREAM_REV^{commit}" 2>/dev/null) \
+        || die "upstream has no $UPSTREAM_REV -- git -C '$UP' fetch --tags"
+    have=$(git -C "$UP" rev-parse HEAD)
+    [ "$want" = "$have" ] || die "upstream is at ${have:0:12}, this recipe is pinned to $UPSTREAM_REV (${want:0:12}).
+       git -C '$UP' checkout $UPSTREAM_REV   -- or set UPSTREAM_REV= to move the pin on purpose"
 }
 
 cmd_deps() {
@@ -393,6 +409,55 @@ cmd_rootfs() {
     done
     [ -f "$sk/etc/hostapd.conf" ] && chmod 644 "$sk/etc/hostapd.conf"
 
+    echo "==> AP at boot"
+    # Upstream's rcS only runs /userdata/etc/init.d/S??*, and /userdata is the
+    # partition this board does not have. Teach it to run the rootfs's own
+    # /etc/init.d/S??* as well (idempotent: marker comment), and ship the AP
+    # start script there.
+    install -Dm755 "$HERE/files/rootfs/etc/init.d/S50dropbear" "$sk/etc/init.d/S50dropbear"
+    # /etc/dropbear ships as a dangling symlink into /userdata (absent here);
+    # replace it with a real directory carrying the shipped host key, so SSH
+    # needs no boot-time key generation (the RNG does not seed on an idle boot).
+    rm -rf "$sk/etc/dropbear"   # symlink on the first run, a real dir on rebuilds
+    install -Dm600 "$HERE/files/rootfs/etc/dropbear/dropbear_ed25519_host_key" \
+                   "$sk/etc/dropbear/dropbear_ed25519_host_key"
+    install -Dm755 "$HERE/files/rootfs/etc/init.d/S90wifi" "$sk/etc/init.d/S90wifi"
+    install -Dm644 "$HERE/files/rootfs/etc/udhcpd.conf" "$sk/etc/udhcpd.conf"
+    local rcs="$sk/etc/init.d/rcS"
+    if grep -q "iwe3000n: rootfs init scripts" "$rcs"; then
+        echo "    rcS already runs /etc/init.d/S??*"
+    else
+        python3 - "$rcs" "$HERE/files/rootfs/etc/init.d/rcS-hook.sh" <<'PYH'
+import sys
+p, h = sys.argv[1], sys.argv[2]
+s = open(p).read(); hook = open(h).read()
+anchor = 'echo "===== System ready ====="'
+assert anchor in s, "rcS anchor not found"
+open(p, "w").write(s.replace(anchor, hook + anchor, 1))
+PYH
+        echo "    rcS now runs /etc/init.d/S??* before 'System ready'"
+    fi
+
+    echo "==> busybox: DHCP server applet (udhcpd)"
+    # Upstream builds busybox without the DHCP *server*; the AP needs it so
+    # clients get an address. Enable it in the base config (idempotent) and
+    # rebuild the binary only when the shipped one lacks the applet -- a full
+    # busybox rebuild is a few minutes, so skip it once it is in.
+    local rfd="$UP/3-Main-SoC-Realtek-RTL8196E/33-Rootfs"
+    local bbcfg="$rfd/busybox/busybox.config"
+    sed -i 's/^# CONFIG_UDHCPD is not set/CONFIG_UDHCPD=y/' "$bbcfg"
+    sed -i 's/^# CONFIG_FEATURE_UDHCPD_WRITE_LEASES_EARLY is not set/CONFIG_FEATURE_UDHCPD_WRITE_LEASES_EARLY=y/' "$bbcfg"
+    sed -i 's#^CONFIG_DHCPD_LEASES_FILE=""#CONFIG_DHCPD_LEASES_FILE="/tmp/udhcpd.leases"#' "$bbcfg"
+    if strings "$sk/bin/busybox" 2>/dev/null | grep -q '^udhcpd$'; then
+        echo "    busybox already has udhcpd"
+    else
+        echo "    rebuilding busybox with udhcpd"
+        docker image inspect "$IMG" >/dev/null 2>&1 || die "no $IMG image; run ./build.sh deps"
+        docker run --rm -v "$UP:/workspace" \
+            -w /workspace/3-Main-SoC-Realtek-RTL8196E/33-Rootfs/busybox "$IMG" \
+            bash -c 'TC=$(ls -d /home/builder/x-tools/*/bin | head -1); export PATH="$TC:$PATH"; ./build_busybox.sh'
+    fi
+
     docker image inspect "$IMG" >/dev/null 2>&1 || die "no $IMG image; run ./build.sh deps"
     docker run --rm -v "$UP:/workspace" \
         -w /workspace/3-Main-SoC-Realtek-RTL8196E/33-Rootfs \
@@ -433,11 +498,45 @@ cmd_shell() {
     docker run --rm -it -v "$UP:/workspace" "$IMG" bash
 }
 
+# cvimg header: 4-byte signature, load address, burn address, length, all
+# big-endian. The loader writes wherever the header says, so print it for the
+# release notes and refuse to package an image aimed at the wrong partition.
+cvimg_burn_addr() { printf '0x%s' "$(xxd -s 8 -l 4 -p "$1")"; }
+
+cmd_release() {
+    local ver="${1:-$(git -C "$HERE" describe --tags --always --dirty)}"
+    cmd_kernel
+    cmd_rootfs
+    local k="$KDIR/kernel-img/iwe3000n/kernel-6.18.img"
+    local r="$UP/3-Main-SoC-Realtek-RTL8196E/33-Rootfs/rootfs.bin"
+    [ -s "$k" ] && [ -s "$r" ] || die "build produced no images"
+    [ "$(cvimg_burn_addr "$k")" = "0x00010000" ] || die "kernel burn address is $(cvimg_burn_addr "$k"), not 0x00010000"
+    [ "$(cvimg_burn_addr "$r")" = "0x00200000" ] || die "rootfs burn address is $(cvimg_burn_addr "$r"), not 0x00200000"
+
+    local out="$HERE/out" kn="iwe3000n-v1-${ver}-kernel.img" rn="iwe3000n-v1-${ver}-rootfs.img"
+    mkdir -p "$out"
+    cp "$k" "$out/$kn"; cp "$r" "$out/$rn"
+    (cd "$out" && sha256sum "$kn" "$rn" > sha256sums.txt)
+    local ks rs
+    ks=$(stat -c %s "$out/$kn"); rs=$(stat -c %s "$out/$rn")
+    echo
+    echo "release $ver in $out/"
+    printf '  %-45s %8d bytes  %4d KiB of 1984 KiB (%d%%)  burn %s\n' "$kn" "$ks" $((ks/1024)) $((ks*100/(1984*1024))) "$(cvimg_burn_addr "$k")"
+    printf '  %-45s %8d bytes  %4d KiB of 1600 KiB (%d%%)  burn %s\n' "$rn" "$rs" $((rs/1024)) $((rs*100/(1600*1024))) "$(cvimg_burn_addr "$r")"
+    [ "$ks" -le $((1984*1024)) ] || die "kernel does not fit its partition"
+    [ "$rs" -le $((1600*1024)) ] || die "rootfs does not fit its partition"
+    # The stock loader silently refuses kernels somewhere between 1808 and
+    # 1896 KiB (docs/M6-FLASH-BUDGET.md): warn before anyone TFTPs it.
+    [ "$ks" -le $((1808*1024)) ] || echo "  WARNING: kernel is larger than any image the loader has been seen to accept (1808 KiB); verify the flash writes"
+    cat "$out/sha256sums.txt"
+}
+
 case "${1:-}" in
     deps)    cmd_deps ;;
     overlay) cmd_overlay ;;
     kernel)  cmd_kernel ;;
     rootfs)  cmd_rootfs ;;
+    release) cmd_release "${2:-}" ;;
     shell)   cmd_shell ;;
-    *)       sed -n '3,16p' "$0"; exit 1 ;;
+    *)       sed -n '3,17p' "$0"; exit 1 ;;
 esac

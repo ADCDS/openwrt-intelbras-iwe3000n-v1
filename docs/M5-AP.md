@@ -1,10 +1,50 @@
 # M5 — hostapd AP on the RTL8192EE
 
-**Status: not complete. The interrupt-delivery root cause is now fixed and
-verified (the PCIe IRQ was never reaching the CPU); enabling it exposes the next
-layer — the RX DMA corrupts host memory, so the board is unstable once the radio
-datapath runs.** An earlier version of this file blamed the RF front end /
-antenna path — that was wrong. Everything below is verified on hardware.
+**Status: reached, 2026-09-01.** hostapd runs a WPA2 AP on the RTL8192EE; a
+real client authenticates, associates, completes the 4-way handshake and
+passes traffic (20/20 pings). The board state and what remains are in the two
+sections at the very end.
+
+This file is a lab notebook, in order, ~1000 lines. It keeps every "Update:"
+including the ones later retracted, because the evidence that killed a theory
+is what a future reader needs. If you want only the result, read this
+summary and the last two sections.
+
+**What was wrong, in the order it was found** (each has a section below):
+
+1. **The PCIe interrupt never reached the CPU** — the SoC's interrupt
+   controller routing register for the PCIe line was zero.
+   `patches/irqchip-rtl819x-route-pcie.patch`.
+2. **The efuse was read byte-swapped** on this big-endian CPU, so the chip's
+   MAC, TX power and crystal calibration were discarded and the radio ran on
+   defaults. `patches/rtlwifi-efuse-big-endian-eeprom-id.patch`.
+3. **RX descriptors were handed to hardware before their buffer was in
+   them** — a refill race in rtlwifi that looked like DMA corruption.
+   `patches/rtlwifi-rx-refill-before-hw-release.patch`.
+4. **The box froze on every AP start**: a level-triggered INTA storm through
+   the ISR's `irq_enabled == 0` early return, ~130 kHz, starving softirqs
+   (the "stopped timer softirq"). Found with an in-kernel probe.
+   `patches/rtlwifi-zzfix-isr-quiesce-when-disabled.patch`.
+5. **The box ran out of memory**: rtlwifi's default RX rings cost 16 MiB on a
+   32 MiB host, surfacing as SIGBUS/SIGSEGV in userspace and an AP that
+   intermittently did not hear its client. `patches/rtlwifi-rx-ring-64.patch`.
+6. **A phone joining froze it again**: with a live client, quiescing the chip
+   is not enough — the line has to be masked at the controller while the
+   driver holds its interrupts off. `patches/rtlwifi-zzfix4-mask-irq-while-driver-disabled.patch`.
+
+**Retracted along the way:** a `raise_softirq()` "fix" (console-print timing
+made it look like it worked); a posted-MMIO-write theory for the 1.3–1.9 s
+management-frame delays (A/B test killed it; the delays were real and stopped
+reproducing once memory pressure was gone, mechanism never pinned); and, in
+the earliest version of this file, the RF front end.
+
+**Still open:** ~10 % of cold boots fault in rcS (I/D-cache coherence
+suspected); the wlan MAC's last byte varies per boot; ~23 % loss at 1 pkt/s
+(power-save shaped); no DHCP server; and the phone re-test of fix 6.
+
+---
+
+Everything below is the notebook, verified on hardware, in the order written.
 
 ## Update: PCIe interrupt delivery fixed (verified), and what it exposed
 

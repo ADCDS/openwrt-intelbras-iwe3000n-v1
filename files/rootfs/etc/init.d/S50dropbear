@@ -1,0 +1,36 @@
+#!/bin/sh
+# S50dropbear -- SSH (dropbear) with the default root password.
+#
+# Uses the host key shipped in /etc/dropbear (see its README): the rootfs is
+# read-only and this board's RNG does not seed on an idle boot, so generating a
+# key at boot would block forever. The shipped key is shared across all units of
+# a release -- a bench convenience, regenerate it for real use.
+#
+# Login is root with the password in /etc/passwd (default root), reachable by
+# anyone who can join the AP. Change both before this is anywhere real. See
+# files/rootfs/README.md.
+HK=/etc/dropbear/dropbear_ed25519_host_key
+case "$1" in
+start)
+	# -x (exact): a bare "pgrep dropbear" also matches this script's own
+	# process name (S50dropbear), so at boot it would wrongly see "already
+	# running" and never start the daemon.
+	if pgrep -x dropbear >/dev/null 2>&1; then
+		echo "S50dropbear: already running"; exit 0
+	fi
+	if [ -s "$HK" ]; then
+		dropbear -r "$HK" -p 22 && echo "S50dropbear: sshd on port 22 (root login)"
+	else
+		# no shipped key: fall back to in-RAM generation, in the background so
+		# boot is not held waiting for the RNG to seed.
+		( dropbearkey -t ed25519 -f /tmp/hostkey >/dev/null 2>&1; exec dropbear -r /tmp/hostkey -p 22 ) &
+		echo "S50dropbear: sshd starting in background (generating a host key)"
+	fi
+	;;
+stop)
+	killall dropbear 2>/dev/null
+	;;
+*)
+	echo "usage: $0 start|stop"
+	;;
+esac

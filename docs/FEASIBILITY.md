@@ -1,5 +1,12 @@
 # Is OpenWrt on the IWE 3000N feasible?
 
+> **How it turned out** (2026-09-01). Route B, jnilo1, won — and the paragraph
+> below about the radio being a vendor driver was the one assumption that did
+> not survive: the chip is an RTL8192EE, mainline `rtl8192ee` drives it, and
+> what was missing was a PCIe *host* driver, not a Wi-Fi driver
+> ([`WIFI-PLAN.md`](WIFI-PLAN.md)). "No vendor image to restore from" was also
+> wrong by the end of the day. Kept as written; the README has the result.
+
 Written 2026-08-31, from one console session on the live unit. No code has been
 written and nothing has been built, so treat this as a scoping document that
 should be revised the moment M0/M1 evidence exists.
@@ -9,7 +16,7 @@ should be revised the moment M0/M1 evidence exists.
 Three of this document's assumptions were tested and two of them broke:
 
 - **A vendor image exists** and is committed
-  ([`../../iwe3000n-firmware/vendor/`](../../iwe3000n-firmware/vendor/)). Mistakes
+  (Intelbras 0.8.6 — see [`RECOVERY.md`](RECOVERY.md)). Mistakes
   are cheaper than this document assumed.
 - **The bootloader stops on ESC** and initialises Ethernet before giving its
   prompt, so a TFTP recovery path is likely.
@@ -38,7 +45,7 @@ Mitigations that exist, none free:
 
 ### 2. The Lexra core
 
-RTL8196E is a Lexra **RLX5281**. Lexra built MIPS-compatible cores that omitted
+RTL8196E is a Lexra **RLX4181**. Lexra built MIPS-compatible cores that omitted
 instructions covered by an SGI/MIPS patent on unaligned load/store, so a stock
 `mips-linux` toolchain does not target them cleanly and needs patching.
 
@@ -58,9 +65,8 @@ usable is a community fork — see [`PRIOR-ART.md`](PRIOR-ART.md).
 present in `/lib/modules/` but unloaded — there is no nl80211 path to this radio.
 Anything that runs here either carries that driver forward or has no Wi-Fi.
 
-Consolation: [`../../../dir842/dir842-rtl8192cd-driver/`](../../../dir842/dir842-rtl8192cd-driver/)
-already has this driver family carved out from the DIR-842 work, and the DIR-842
-port got it compiling against kernel 4.14 (`g3-rtl8192cd-4.14-port.patch`). It is
+Consolation: the DIR-842 port in this workspace (its vendor-driver tree is
+private) already has this driver family carved out, and got it compiling against kernel 4.14 (`g3-rtl8192cd-4.14-port.patch`). It is
 a different SoC and a different radio, so the source will not drop in — but the
 hard part, "how do you make this vendor tree build against a modern kernel", has
 been done once already in this workspace.

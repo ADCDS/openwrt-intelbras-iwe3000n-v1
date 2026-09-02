@@ -20,9 +20,10 @@ files inside the squashfs. Content is copied verbatim from upstream's
 `34-Userdata/skeleton/etc/`, so the credential is **the upstream default,
 `root` / `root`** — not something invented here.
 
-⚠ That is a published default password baked into a read-only image. It is fine
-for a bench board with no radio and no routed network, and it must be changed
-before M5 (hostapd/AP) puts this device on the air. Changing it means writing
+⚠ That is a published default password baked into a read-only image, and since
+M5 this device is on the air with a WPA2 passphrase that is also in this repo
+(`etc/hostapd.conf`). Anyone who can join the AP can log in over dropbear.
+Change both before this is anywhere real. Changing the password means writing
 `/userdata/etc/passwd` on the overlay, which then shadows nothing — the squashfs
 copy is what `login` reads, so the symlink would have to come back for a
 per-device password to take effect.

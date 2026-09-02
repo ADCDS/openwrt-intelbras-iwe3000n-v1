@@ -1,5 +1,13 @@
 # Getting the radio working
 
+> **How it turned out** (2026-09-01). This plan held. Step 1 read back
+> `818B10EC` from mainline code ([`M3-PCIE.md`](M3-PCIE.md)), the host driver
+> grew into `files/drivers/pci/controller/pci-rtl819x.c`, `rtl8192ee` probed
+> ([`M4-RADIO.md`](M4-RADIO.md)) and hostapd runs an AP ([`M5-AP.md`](M5-AP.md)).
+> Two things went differently: the stack is built in, not modules (upstream
+> has `CONFIG_MODULES` off), which is why the kernel partition grew; and the
+> `PCI_DRIVERS_GENERIC` flip below was real and is in `build.sh`.
+
 jnilo1's tree ships with `# CONFIG_WLAN is not set` and no wireless driver. This
 is the plan to change that. Written 2026-08-31; **nothing here has been built or
 booted yet.**
@@ -8,7 +16,7 @@ booted yet.**
 
 The obvious reading of "jnilo1 has no Wi-Fi" is that the vendor `rtl8192cd`
 driver must be forward-ported from Linux 3.10 to 6.18. That driver is
-[in this workspace already](../../../dir842/dir842-rtl8192cd-driver/): **37 MB,
+in this workspace already (private carve-out from the DIR-842 port): **37 MB,
 291 `.c` files, 374 headers**, WEXT-era, with its own PCIe bring-up, its own
 bridge/NAT hooks and its own hostapd fork. Forward-porting it would be the
 largest single piece of work in this project.

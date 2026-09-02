@@ -45,11 +45,11 @@ the firmware then added 20 KiB.
 ## The kernel partition is the tight one, and there is a hard ceiling
 
 90 % is uncomfortable, and it cannot simply be enlarged: **the RealTek loader
-refuses to write a kernel image somewhere between 1764 and 1896 KiB.** It
+refuses to write a kernel image somewhere between 1808 and 1896 KiB.** It
 accepts the image over TFTP, prints `checksum Ok !` and the burn address, then
 scans `no sys signature at 000NN000!` 48 times and gives up *without writing and
-without an error*. 1764 KiB writes; 1896 KiB does not. The exact threshold was
-not bisected.
+without an error*. 1764 KiB writes, and so does the 1808 KiB v1.0 kernel;
+1896 KiB does not. The exact threshold was not bisected.
 
 So the practical kernel ceiling on this board is the loader's, not the partition
 table's, and it is roughly 100 KiB above where the current image sits. Anything

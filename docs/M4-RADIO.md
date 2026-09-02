@@ -77,7 +77,7 @@ extraction.
   reads `Autoload OK` and the chip's real MAC and calibration load. See
   `M5-AP.md`.
 - **The RTL8192EE's own efuse MAC** (now `00:e0:4c:81:92:b2`, read correctly
-  after the efuse fix) is the chip's, not the board's `D8:77:8B:3F:E2:01` from
+  after the efuse fix) is the chip's, not the board's `D8:77:8B:xx:xx:xx` from
   the H601 block. Wiring the H601 MAC in is future work sharing the `nvmem-cell`
   mechanism the ethernet MAC needs (see `M2-ETHERNET.md`).
 - **`BAR 0 [io size 0x0100]: can't assign; no space`** — the endpoint asks for a

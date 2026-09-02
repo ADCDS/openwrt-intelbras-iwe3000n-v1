@@ -2,7 +2,7 @@
 
 **Status: done, verified on hardware 2026-08-31.**
 
-Linux 6.18.45 on the Intelbras IWE 3000N v1 (RTL8196E, Lexra RLX5281). As far as
+Linux 6.18.45 on the Intelbras IWE 3000N v1 (RTL8196E, Lexra RLX4181). As far as
 this project can establish, the first mainline-kernel boot on any Intelbras
 device — the OpenWrt forum's position in January 2024 was "No Intelbras devices
 are currently supported."
@@ -48,8 +48,8 @@ Root filesystem upgrade.  checksum Ok !  burn Addr =0x00200000!  Flash Write Suc
 ```
 
 `mtd0` was not written. The stock RealTek loader and the H601 factory block at
-`0x6000` are untouched, so the board remains restorable from
-`../../iwe3000n-firmware/` (verified dump) or its `vendor/` (Intelbras image).
+`0x6000` are untouched, so the board remains restorable from the verified dump
+or from Intelbras's image ([`RECOVERY.md`](RECOVERY.md)).
 
 Procedure, reproducible:
 

@@ -1,5 +1,11 @@
 # Prior art — RTL8196E / RTL819x on OpenWrt
 
+> **How it turned out** (2026-09-01). jnilo1/rtl8196e-gateway was the base;
+> the "no 8192E wifi" column below was answered by mainline `rtl8192ee` plus a
+> new PCIe host driver rather than by any vendor tree, and `lekswrt`'s
+> `arch/rlx/soc-rtl8196e/pci.c` turned out to be the one file worth reading
+> for the PCIe bring-up ([`M3-PCIE.md`](M3-PCIE.md)).
+
 Collected 2026-08-31. **None of these has been evaluated hands-on yet** — this is
 a reading list for milestone M2, not a recommendation.
 
@@ -51,9 +57,9 @@ probably not worth the wait — see below.
 ## The vendor image, which does exist
 
 `https://backend.intelbras.com/sites/default/files/2019-03/iwe3000n_0.8.6.zip`
-(403s a bare curl; wants a browser User-Agent and Referer). Downloaded, verified
-and committed to
-[`../../iwe3000n-firmware/vendor/`](../../iwe3000n-firmware/vendor/).
+(403s a bare curl; wants a browser User-Agent and Referer). Downloaded and
+verified; kept in the private firmware-backup repo alongside the unit's dump
+(see [`RECOVERY.md`](RECOVERY.md)).
 
 ## The build system is public even though the vendor's tree is not
 
@@ -108,12 +114,12 @@ Mainline OpenWrt remains a dead end — the official `realtek` target is
 rtl838x/839x/930x/931x switch silicon, and the RTL8196E branch stalled in April
 2021 with ethernet unfinished.
 
-## In-workspace prior art## In-workspace prior art
+## In-workspace prior art
 
 Not third-party, and more directly useful than most of the above:
 
-- [`../../../dir842/openwrt-dlink-dir842-r1/`](../../../dir842/openwrt-dlink-dir842-r1/)
+- [ADCDS/openwrt-dlink-dir842-r1](https://github.com/ADCDS/openwrt-dlink-dir842-r1)
   — a completed RealTek port (RTL8197F) in this workspace. Its `docs/BENCH.md`,
   `docs/RESTORE-STOCK.md` and RAM-boot-first posture are the template.
-- [`../../../dir842/dir842-rtl8192cd-driver/`](../../../dir842/dir842-rtl8192cd-driver/)
+- the DIR-842 port's `rtl8192cd` carve-out (private, Realtek all-rights-reserved)
   — the vendor Wi-Fi driver, already carved out, already ported once to 4.14.

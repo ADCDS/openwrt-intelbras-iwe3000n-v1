@@ -84,8 +84,8 @@ will differ on the next one:
 2: eth0: ... link/ether 06:df:06:1c:6d:2e brd ff:ff:ff:ff:ff:ff
 ```
 
-The board's real MAC, `D8:77:8B:3F:E2:01`, lives in the H601 factory block at
-`mtd0` offset `0x6000` (see `../../iwe3000n-firmware/PARTITIONS.md`). Nothing in
+The board's real MAC, `D8:77:8B:xx:xx:xx`, lives in the H601 factory block at
+`mtd0` offset `0x6000` (see [`RECOVERY.md`](RECOVERY.md)). Nothing in
 this port reads it yet, so every boot presents a new address — DHCP reservations,
 ARP caches and anything MAC-pinned will not survive a reboot.
 
