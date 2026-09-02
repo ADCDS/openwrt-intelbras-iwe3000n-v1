@@ -16,9 +16,9 @@ that pinned upstream went into them.
 
 | file | bytes | fits | burn address | writes |
 |---|---|---|---|---|
-| `iwe3000n-v1-v1.0-kernel.img` | 1 859 584 | 1816 KiB of 1984 KiB (91 %) | `0x00010000` | the `kernel` partition |
-| `iwe3000n-v1-v1.0-rootfs.img` | 1 425 760 | 1392 KiB of 1600 KiB (87 %) | `0x00200000` | the `rootfs` partition |
-| `iwe3000n-v1-v1.0-webflash.bin` | 3 457 362 | kernel + pad + squashfs, MD5-prefixed | `0x00010000` (inside) | stock's web updater writes it to `linux` |
+| `iwe3000n-v1-v1.0-kernel.img` | 1 855 488 | 1812 KiB of 1984 KiB (91 %) | `0x00010000` | the `kernel` partition |
+| `iwe3000n-v1-v1.0-rootfs.img` | 1 395 308 | 1362 KiB of 1600 KiB (85 %) | `0x00200000` | the `rootfs` partition |
+| `iwe3000n-v1-v1.0-webflash.bin` | 3 426 930 | kernel + pad + squashfs, MD5-prefixed | `0x00010000` (inside) | stock's web updater writes it to `linux` |
 
 Both are `cvimg`-headed for the stock RealTek loader's TFTP; the loader reads
 the burn address from the header and prints it (`burn Addr =0x...!`) before

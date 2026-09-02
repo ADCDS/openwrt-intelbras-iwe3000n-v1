@@ -57,7 +57,7 @@ chosen and the name stays for findability. Read it as "replacement firmware".
 | ethernet | `rtl8196e-eth`, 100 Mbit jack; iperf3 **73 Mbit/s out, 91 Mbit/s in** ([M2](docs/M2-ETHERNET.md)) |
 | PCIe | from-scratch host driver `pci-rtl819x.c`; the RTL8192EE enumerates as `10ec:818b` ([M3](docs/M3-PCIE.md), [M4](docs/M4-RADIO.md)) |
 | Wi-Fi | mainline `rtl8192ee` + hostapd 2.11, WPA2-PSK AP up at boot; a client authenticates, associates, completes the 4-way handshake and pings 20/20 ([M5](docs/M5-AP.md)) |
-| flash | kernel 1816 KiB of 1984 (91 %), rootfs 1392 KiB of 1600 (87 %; wpa_supplicant is the big addition), 448 KiB jffs2 overlay ([M6](docs/M6-FLASH-BUDGET.md)) |
+| flash | kernel 1812 KiB of 1984 (91 %), rootfs 1362 KiB of 1600 (85 %; wpa_supplicant is the big addition), 448 KiB jffs2 overlay ([M6](docs/M6-FLASH-BUDGET.md)) |
 | services | **DHCP server** on the AP (`192.168.50.100`–`.200`), **SSH** (dropbear, root login), **mDNS**: in client mode the box answers as **`iwe3000n.local`** (`ssh root@iwe3000n.local`) — see the known issue about AP mode |
 | client mode | `wifi-mode client` joins a WPA2 network as a station: authenticates, associates, completes the 4-way handshake, gets a DHCP lease ([how](docs/INSTALL.md#client-mode)). Two rtlwifi fixes made this possible (`patches/rtlwifi-zzzsta-station-mode.patch`) |
 | button | the WPS button is live and programmable: short press runs `/etc/button/short`, long press `/etc/button/long` (default: toggle AP ↔ client); red/blue LEDs via `led` |
