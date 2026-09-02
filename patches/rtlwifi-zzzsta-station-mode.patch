@@ -1,0 +1,84 @@
+rtlwifi: rtl8192ee station mode -- keep the NIC on, and do not reset the MGQ pointer at association
+
+Two faults, found by instrumenting the TX path and capturing the air with a
+second radio, kept this board from ever joining a network as a station:
+
+1. Inactive power-save (default on) turns the RF off whenever a station is
+   unlinked and not scanning. rtl_op_tx then silently drops every management
+   frame (rfpwr_state != ERFON; rtl_dbg is compiled out here). wpa_supplicant
+   reported the auth request "sent" while the air showed nothing -- not even
+   scan probe requests. AP mode never engages IPS, which is why it was
+   unaffected. Disable IPS: the board is mains-powered.
+
+2. With IPS off the station authenticated and associated, and then the
+   management queue died for the rest of the boot: its hardware read pointer
+   froze at the write pointer's value of that instant (snapshot: reg=017101d4
+   .. 017101d6, no MGNTDOK) while every later auth frame was kicked into it.
+   The freeze coincides with _rtl92ee_download_rsvd_page(), run once at
+   association, which "resets the TX BD pointer" by writing BIT(4) of
+   REG_MGQ_TXBD_NUM + 3 -- a byte that is actually the high half of
+   REG_RX_RXBD_NUM. Skipping that write keeps the pointers tracking through
+   association (reg=00520052 after the join) and the WPA2 4-way handshake
+   completes: wpa_state=COMPLETED, pairwise CCMP, EAPOL 1/4..4/4 on air.
+
+The reserved-page download itself is not confirmed by the firmware on this
+board (bcnvalid never sets); the station associates and passes traffic
+regardless, so it is reported once and left as a known item.
+
+diff -Naur a/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/hw.c b2/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/hw.c
+--- a/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/hw.c	2026-09-02 00:20:59.867036064 -0300
++++ b/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/hw.c	2026-09-02 00:35:47.956702106 -0300
+@@ -364,15 +364,18 @@
+ 		/* download rsvd page */
+ 		rtl92ee_set_fw_rsvdpagepkt(hw, false);
+ 
++		/* Do not reset the TX BD pointer here. On the RTL8196E port this
++		 * write (REG_MGQ_TXBD_NUM + 3, BIT(4) -- the byte is really the
++		 * high half of REG_RX_RXBD_NUM) left the management queue's
++		 * hardware read pointer frozen at the write pointer of this
++		 * moment: every later auth/probe frame was kicked, never
++		 * transmitted, never completed, and the station could not
++		 * re-associate until reboot. Without it the pointers keep
++		 * tracking and association + the 4-way handshake complete.
++		 * The reserved-page download below still runs (and, on this
++		 * board, does not get confirmed -- see the warning). */
+ 		txbc_reg = rtl_read_byte(rtlpriv, REG_MGQ_TXBD_NUM + 3);
+-		count = 0;
+-		while ((txbc_reg & BIT(4)) && count < 20) {
+-			count++;
+-			udelay(10);
+-			txbc_reg = rtl_read_byte(rtlpriv, REG_MGQ_TXBD_NUM + 3);
+-		}
+-		rtl_write_byte(rtlpriv, REG_MGQ_TXBD_NUM + 3,
+-			       txbc_reg | BIT(4));
++		(void)txbc_reg;
+ 
+ 		/* check rsvd page download OK. */
+ 		bcnvalid_reg = rtl_read_byte(rtlpriv, REG_DWBCN0_CTRL + 2);
+@@ -383,6 +386,8 @@
+ 			bcnvalid_reg = rtl_read_byte(rtlpriv,
+ 						     REG_DWBCN0_CTRL + 2);
+ 		}
++		if (!(bcnvalid_reg & BIT(0)))
++			pr_warn_once("rtl8192ee: reserved-page download not confirmed by firmware (station still associates)\n");
+ 
+ 		if (bcnvalid_reg & BIT(0))
+ 			rtl_write_byte(rtlpriv, REG_DWBCN0_CTRL + 2, BIT(0));
+diff -Naur a/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/sw.c b2/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/sw.c
+--- a/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/sw.c	2026-09-01 23:27:28.302367091 -0300
++++ b/drivers/net/wireless/realtek/rtlwifi/rtl8192ee/sw.c	2026-09-02 00:35:47.956702106 -0300
+@@ -227,7 +227,13 @@
+ 
+ static struct rtl_mod_params rtl92ee_mod_params = {
+ 	.sw_crypto = false,
+-	.inactiveps = true,
++	/* Inactive power-save turns the RF off whenever a station is unlinked
++	 * and not scanning, and rtl_op_tx then drops every management frame
++	 * (rfpwr_state != ERFON) -- a station could never even send its auth
++	 * request (verified on air: nothing transmitted while wpa_supplicant
++	 * reported "send successfully"). AP mode never engages IPS. Keep the
++	 * NIC on; this board is mains-powered, there is nothing to save. */
++	.inactiveps = false,
+ 	.swctrl_lps = false,
+ 	.fwctrl_lps = true,
+ 	.msi_support = true,

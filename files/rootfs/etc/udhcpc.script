@@ -1,0 +1,28 @@
+#!/bin/sh
+# udhcpc.script -- apply a DHCP lease (busybox udhcpc -s). The upstream rootfs
+# ships no /usr/share/udhcpc/default.script, so udhcpc obtained a lease and
+# then configured nothing. Called with $1 = deconfig | bound | renew | nak.
+RESOLV=/tmp/resolv.conf
+case "$1" in
+	deconfig)
+		ip addr flush dev "$interface" 2>/dev/null
+		;;
+	bound|renew)
+		ip addr flush dev "$interface" 2>/dev/null
+		ip addr add "$ip/${mask:-24}" dev "$interface"
+		if [ -n "$router" ]; then
+			ip route del default dev "$interface" 2>/dev/null
+			for r in $router; do ip route add default via "$r" dev "$interface" && break; done
+		fi
+		if [ -n "$dns" ]; then
+			: > "$RESOLV"
+			for d in $dns; do echo "nameserver $d" >> "$RESOLV"; done
+			[ -L /etc/resolv.conf ] || cp "$RESOLV" /etc/resolv.conf 2>/dev/null
+		fi
+		echo "udhcpc: $interface $ip/$mask via ${router:-none}"
+		;;
+	nak)
+		echo "udhcpc: NAK from ${serverid:-?}"
+		;;
+esac
+exit 0

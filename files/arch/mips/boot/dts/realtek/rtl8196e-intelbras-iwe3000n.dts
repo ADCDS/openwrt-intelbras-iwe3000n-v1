@@ -17,9 +17,9 @@
  *     eth0 vid=9 member port 0x10f, eth1 vid=8 member port 0x110
  *
  * Not measured, deliberately absent:
- *   - LED and button GPIOs. The stock firmware loads gpio_button_hotplug and
- *     /etc/rc.button/{reset,wps,rfkill,power} exist, so there is at least a
- *     reset button, but no pin has been traced. Adding a wrong gpio-leds node
+ *   - LED and button GPIOs, now traced from the stock firmware: gpio 4 is the
+ *     WPS button, gpio 13 the red LED, gpio 14 the blue LED. Exposed through
+ *     &gpio0 below and driven from userspace (see files/rootfs). A wrong node
  *     is worse than having none.
  *   - There is no EFR32 radio on this board, so the upstream radio-bridge node
  *     is dropped rather than adapted.
@@ -64,7 +64,7 @@
 		};
 	};
 
-	/* TODO: leds { } once the status/LAN LED GPIOs are traced. */
+	/* LEDs are driven from userspace over /sys/class/gpio; see &gpio0. */
 };
 
 &uart0 {
@@ -239,4 +239,24 @@
 	 * single jack carrying eth1. Mirror that here once the upstream
 	 * interface@N binding is understood.
 	 */
+};
+
+&gpio0 {
+	/*
+	 * The SoC GPIO controller. Enabled so userspace can reach the panel
+	 * button and LEDs over /sys/class/gpio (GPIO_SYSFS_LEGACY). Line names
+	 * were read from the stock firmware's /sys/kernel/debug/gpio:
+	 *   gpio 4  = WPS button (input, active low)
+	 *   gpio 13 = red LED    (output)
+	 *   gpio 14 = blue LED   (output)
+	 * The rootfs drives these directly (see files/rootfs/sbin/led and
+	 * etc/init.d/S60button); no gpio-keys/gpio-leds nodes, to keep the
+	 * kernel under the loader's size ceiling.
+	 */
+	status = "okay";
+	gpio-line-names =
+		"", "", "", "",					/* 0-3   */
+		"wps-button", "", "", "",			/* 4-7   */
+		"", "", "", "",					/* 8-11  */
+		"", "red-led", "blue-led", "";			/* 12-15 */
 };

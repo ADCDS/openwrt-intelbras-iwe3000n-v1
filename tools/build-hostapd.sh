@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# build-hostapd.sh — cross-build hostapd for the IWE 3000N (M5).
+# build-hostapd.sh — cross-build the wifi userspace (hostapd + wpa_supplicant)
+# for the IWE 3000N. hostapd runs the AP; wpa_supplicant joins a network as a
+# client. Both build from the same hostapd-2.11 tarball against libnl-tiny.
 #
 # Upstream jnilo1 ships no hostapd, no iw and no wpa_supplicant: their gateway
 # is a Zigbee coordinator and has never needed an AP. mac80211 drivers do not
@@ -89,6 +91,30 @@ make CC="$CC" -j"$(nproc)" hostapd hostapd_cli
 
 "${CROSS}-strip" hostapd hostapd_cli
 cp hostapd hostapd_cli "$OUT/"
-ls -l "$OUT"/hostapd*
+
+echo "==> wpa_supplicant $HOSTAPD_VER (client/STA mode -- join a WPA2 network)"
+# wpa_supplicant ships as its own tarball on w1.fi, not inside hostapd's.
+cd "$WORK"
+[ -f "wpa_supplicant-${HOSTAPD_VER}.tar.gz" ] ||     wget -q "https://w1.fi/releases/wpa_supplicant-${HOSTAPD_VER}.tar.gz"
+[ -d "wpa_supplicant-${HOSTAPD_VER}" ] || tar xf "wpa_supplicant-${HOSTAPD_VER}.tar.gz"
+cd "wpa_supplicant-${HOSTAPD_VER}/wpa_supplicant"
+# Minimal station: nl80211 + WPA-PSK + a control interface for wpa_cli.
+# No EAP, no WPS, no P2P, no mesh -- bytes we do not need in a 1600 KiB rootfs.
+cat > .config <<'EOC'
+CONFIG_DRIVER_NL80211=y
+CONFIG_LIBNL_TINY=y
+CONFIG_CTRL_IFACE=y
+CONFIG_BACKEND=file
+CONFIG_IEEE80211N=y
+CONFIG_TLS=internal
+CONFIG_INTERNAL_LIBTOMMATH=y
+CONFIG_ELOOP=eloop
+CONFIG_NO_RANDOM_POOL=y
+EOC
+make CC="$CC" -j"$(nproc)" wpa_supplicant wpa_cli
+"${CROSS}-strip" wpa_supplicant wpa_cli
+cp wpa_supplicant wpa_cli "$OUT/"
+
+ls -l "$OUT"/hostapd* "$OUT"/wpa_*
 echo
-echo "Copy these into files/rootfs/usr/sbin/ and re-run ./build.sh rootfs."
+echo "Binaries are in prebuilt/. build.sh rootfs installs them into the image."

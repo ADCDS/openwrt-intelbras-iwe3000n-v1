@@ -67,18 +67,31 @@ Upload `webflash.bin` through the stock web UI's firmware page.
 
 ## How to do it
 
-1. Put your computer on the stock LAN. Stock's default is `10.0.0.1`; give
-   yourself `10.0.0.2/24` on the wired port (stock also runs DHCP, so an
-   address may come automatically).
-2. Open `http://10.0.0.1/` and go to **Atualizar firmware** (the firmware page,
-   `#!/main/firmware`). Log in if asked — the bench unit's web login was the
-   stock default `admin` / `admin`.
-3. Choose `iwe3000n-v1-v1.0-webflash.bin` and press **Atualizar**. The page
-   shows *"Enviando arquivo. Pode demorar alguns minutos."* while it uploads.
-4. Wait. The device writes flash and reboots itself into the port — the AP
-   `IWE3000N-test` comes up on `192.168.50.1`. Your `10.0.0.x` address stops
-   working because the port is not a `10.0.0.1` repeater; join the Wi-Fi
-   instead.
+**1. Put your computer on the stock LAN.** Stock's default address is
+`10.0.0.1`; give yourself `10.0.0.2/24` on the wired port (stock also runs a
+DHCP server, so an address may arrive on its own). Open `http://10.0.0.1/` and,
+from the menu, go to **Atualizar firmware** (the firmware page,
+`#!/main/firmware`). Log in if asked — the bench unit's web login was the stock
+default `admin` / `admin`.
+
+![The stock firmware-update page](img/ota-1-firmware-page.png)
+
+**2. Choose the image.** Click the file field and pick
+`iwe3000n-v1-v1.0-webflash.bin` (from the release page). The filename appears in
+the box.
+
+![The web-flash image selected](img/ota-2-file-selected.png)
+
+**3. Press Atualizar.** The page shows *"Enviando arquivo. Pode demorar alguns
+minutos."* while the browser uploads the image to the device.
+
+![Uploading the image](img/ota-3-uploading.png)
+
+**4. Wait for the reboot.** The device writes flash and restarts itself into the
+port; stock shows *"Seu IWE 3000N foi atualizado!"* just before it goes. The AP
+`IWE3000N-test` then comes up on `192.168.50.1`. Your `10.0.0.x` address stops
+working because the port is not a `10.0.0.1` repeater — join the Wi-Fi instead
+(WPA2, passphrase `iwe3000n-bench`), or reach it by SSH at `root@192.168.50.1`.
 
 ## What the updater actually does (from the verified run)
 

@@ -101,6 +101,49 @@ Ethernet comes up as `eth0` with a random MAC and no address; `ip addr add`
 what you need, or `udhcpc -i eth0`. There is no DHCP *server* on `eth0`, only
 on the AP.
 
+## Client mode
+
+The board can join an existing WPA2 network as a station instead of serving
+its own AP. Write the network into a config and switch roles:
+
+```sh
+# on the board (this boot; survives until power-off)
+cat > /tmp/wpa_supplicant.conf <<EOF
+ctrl_interface=/var/run/wpa_supplicant
+network={
+  ssid="YourNetwork"
+  psk="YourPassphrase"
+  key_mgmt=WPA-PSK
+}
+EOF
+wifi-mode client        # stops the AP, joins, gets an address by DHCP
+wpa_cli -i wlan0 status | grep -E "wpa_state|^bssid|^freq"   # wpa_state=COMPLETED
+ip -4 addr show wlan0
+wifi-mode ap            # back to serving IWE3000N-test
+```
+
+`wifi-mode toggle` flips between the two; the WPS button's default **long
+press** does the same, so a headless box can be switched without a console.
+Config lookup order: `/tmp/wpa_supplicant.conf`, then `/userdata/wpa_supplicant.conf`
+(persistent, when that jffs2 overlay mounts -- it does not always on this
+board), then the built-in placeholder `/etc/wpa_supplicant.conf`. Edit the
+built-in one in `files/rootfs/etc/` and rebuild for a permanent default. The
+radio is one 2.4 GHz PHY: AP *or* station, never both at once.
+
+Verified on the bench against a WPA2 network: authenticate, associate, 4-way
+handshake (`pairwise_cipher=CCMP`), DHCP lease from the network's router,
+ping through it.
+
+## The WPS button and the LEDs
+
+The front button (GPIO 4) is watched by `S60button`. A press shorter than 3 s
+runs `/etc/button/short` (default: blink the blue LED three times); 3 s or
+longer runs `/etc/button/long` (default: `wifi-mode toggle`). Put your own
+executable at `/userdata/button/short` or `/userdata/button/long` to reprogram
+it at runtime (when `/userdata` mounts), or edit `files/rootfs/etc/button/` and
+rebuild. `led red|blue on|off` drives the two panel LEDs (GPIO 13 / 14); AP
+mode lights blue, client mode lights red.
+
 ## 5. Updating
 
 Same as installing: loader, TFTP, kernel then rootfs. `rootfs_data` (jffs2,

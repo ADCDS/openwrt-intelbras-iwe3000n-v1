@@ -1,0 +1,52 @@
+#!/bin/sh
+# S60button -- make the WPS button usable and programmable.
+#
+# Button = GPIO line 4 (from the stock firmware), active-low: idle reads 1,
+# pressed reads 0. Handled entirely in userspace over GPIO sysfs, so it needs
+# no kernel input driver. The rtl8196e gpiochip has a non-zero sysfs base, so
+# the export number is base + 4 (looked up below). A short and a long press
+# each run a script you can change:
+#   short (< 3 s):  /userdata/button/short if present, else /etc/button/short
+#   long  (>= 3 s): /userdata/button/long  if present, else /etc/button/long
+# The /userdata forms let you reprogram the button at runtime without a
+# rebuild, when /userdata is writable; otherwise edit /etc/button/* and rebuild.
+G=/sys/class/gpio
+BTN_OFF=4
+LONG_S=3
+
+gpio_base() {
+	local c
+	for c in "$G"/gpiochip*; do
+		[ "$(cat "$c/label" 2>/dev/null)" = gpio-rtl819x ] && { cat "$c/base"; return; }
+	done
+	echo 0
+}
+run() {
+	local h
+	for h in "/userdata/button/$1" "/etc/button/$1"; do
+		[ -x "$h" ] && { echo "S60button: $1 press -> $h"; "$h" & return; }
+	done
+}
+watch() {
+	local N V pressed=0 t0=0 now dur
+	N=$(( $(gpio_base) + BTN_OFF ))
+	[ -d "$G/gpio$N" ] || echo "$N" > "$G/export" 2>/dev/null
+	echo in > "$G/gpio$N/direction" 2>/dev/null
+	V="$G/gpio$N/value"
+	[ -r "$V" ] || { echo "S60button: cannot read gpio$N"; return; }
+	echo "S60button: watching the WPS button (line $BTN_OFF = sysfs gpio$N)"
+	while :; do
+		if [ "$(cat "$V" 2>/dev/null)" = 0 ]; then
+			[ "$pressed" = 0 ] && { pressed=1; t0=$(cut -d. -f1 /proc/uptime); }
+		elif [ "$pressed" = 1 ]; then
+			pressed=0; now=$(cut -d. -f1 /proc/uptime); dur=$((now - t0))
+			[ "$dur" -ge "$LONG_S" ] && run long || run short
+		fi
+		sleep 1
+	done
+}
+case "$1" in
+	start) watch & echo "$!" > /tmp/button.pid; echo "S60button: started" ;;
+	stop) kill "$(cat /tmp/button.pid 2>/dev/null)" 2>/dev/null ;;
+	*) echo "usage: $0 start|stop" ;;
+esac

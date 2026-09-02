@@ -1,0 +1,20 @@
+#!/bin/sh
+# led -- drive the IWE 3000N's two panel LEDs over GPIO sysfs (no kernel LED
+# driver needed). Line offsets read from the stock firmware: red = 13,
+# blue = 14. The rtl8196e gpiochip is allocated a non-zero sysfs base, so the
+# export number is base + offset (base is 512 on this kernel but is looked up,
+# not assumed).  usage: led red|blue on|off
+case "$1" in red) OFF=13;; blue) OFF=14;; *) echo "usage: $0 red|blue on|off"; exit 1;; esac
+G=/sys/class/gpio
+base=0
+for c in "$G"/gpiochip*; do
+	[ "$(cat "$c/label" 2>/dev/null)" = gpio-rtl819x ] && { base=$(cat "$c/base"); break; }
+done
+N=$((base + OFF))
+[ -d "$G/gpio$N" ] || echo "$N" > "$G/export" 2>/dev/null
+echo out > "$G/gpio$N/direction" 2>/dev/null
+case "$2" in
+	on)  echo 1 > "$G/gpio$N/value" 2>/dev/null ;;
+	off) echo 0 > "$G/gpio$N/value" 2>/dev/null ;;
+	*) echo "usage: $0 red|blue on|off"; exit 1 ;;
+esac

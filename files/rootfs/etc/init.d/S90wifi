@@ -1,45 +1,68 @@
 #!/bin/sh
-# S90wifi -- bring the 2.4 GHz AP up at boot.
+# S90wifi -- bring Wi-Fi up at boot in the configured role.
 #
-# Run by rcS after the base system is up (build.sh rootfs teaches upstream's
-# rcS to run /etc/init.d/S??*; upstream only looks in /userdata, a partition
-# this board does not have).
+# Role is "ap" (default) or "client":
+#   ap     -- hostapd runs the IWE3000N-test AP on 192.168.50.1 + a udhcpd
+#             DHCP server (192.168.50.100-200). Clients may also use a static
+#             address in that /24.
+#   client -- wpa_supplicant joins the network in /etc/wpa_supplicant.conf and
+#             udhcpc gets an address from it.
+# Switch with `wifi-mode ap|client|toggle`, or the WPS button (long press).
+# SSID/passphrase for the AP: /etc/hostapd.conf. SSH is S50dropbear.
 #
-# Starts hostapd and a udhcpd DHCP server (192.168.50.100-200); the AP itself
-# is 192.168.50.1. Clients can DHCP or use a static address in that /24. SSID
-# and passphrase live in /etc/hostapd.conf; SSH is S50dropbear.
-case "$1" in
-start)
-	if [ ! -d /sys/class/net/wlan0 ]; then
-		echo "S90wifi: no wlan0, radio did not probe"
-		exit 0
-	fi
-	ip link set wlan0 up
-	ip addr add 192.168.50.1/24 dev wlan0 2>/dev/null
+# rcS runs /etc/init.d/S??* (build.sh teaches it to; upstream only looks in
+# /userdata, a partition this board does not have).
+RUN=/tmp/wifi.mode
+mode() { cat "$RUN" 2>/dev/null || cat /userdata/wifi.mode 2>/dev/null || cat /etc/wifi-mode 2>/dev/null || echo ap; }
+
+start() {
+	[ -d /sys/class/net/wlan0 ] || { echo "S90wifi: no wlan0, radio did not probe"; exit 0; }
+	M=$(mode); echo "$M" > "$RUN"
 	mkdir -p /var/run
-	if hostapd -B /etc/hostapd.conf; then
-		echo "S90wifi: hostapd started, AP $(sed -n 's/^ssid=//p' /etc/hostapd.conf) on 192.168.50.1"
-	else
-		echo "S90wifi: hostapd failed to start"
-	fi
-	# DHCP server for clients on the AP. Needs wlan0 to already carry
-	# 192.168.50.1 (set above); leases go to RAM.
-	if [ -f /etc/udhcpd.conf ]; then
-		: > /tmp/udhcpd.leases
-		if command -v udhcpd >/dev/null 2>&1; then DHCPD="udhcpd"; else DHCPD="busybox udhcpd"; fi
-		if $DHCPD /etc/udhcpd.conf; then
-			echo "S90wifi: udhcpd serving 192.168.50.100-200"
+	ip link set wlan0 up
+	if [ "$M" = client ]; then
+		# built-in default, then the persistent overlay (when it mounted),
+		# then a this-boot-only copy in RAM -- the jffs2 overlay on this
+		# board does not always mount, so /tmp is the reliable override.
+		CONF=/etc/wpa_supplicant.conf
+		[ -f /userdata/wpa_supplicant.conf ] && CONF=/userdata/wpa_supplicant.conf
+		[ -f /tmp/wpa_supplicant.conf ] && CONF=/tmp/wpa_supplicant.conf
+		led blue off; led red on
+		rm -rf /var/run/wpa_supplicant
+		if wpa_supplicant -B -i wlan0 -c "$CONF"; then
+			udhcpc -b -i wlan0 -s /etc/udhcpc.script -x hostname:iwe3000n >/dev/null 2>&1
+			echo "S90wifi: client mode, joining $(sed -n 's/.*ssid=\"\(.*\)\".*/\1/p' "$CONF" | head -1)"
 		else
-			echo "S90wifi: udhcpd failed to start"
+			echo "S90wifi: wpa_supplicant failed to start"
+		fi
+	else
+		ip addr add 192.168.50.1/24 dev wlan0 2>/dev/null
+		led red off; led blue on
+		if hostapd -B /etc/hostapd.conf; then
+			echo "S90wifi: AP mode, $(sed -n 's/^ssid=//p' /etc/hostapd.conf) on 192.168.50.1"
+			[ -f /etc/udhcpd.conf ] && { : > /tmp/udhcpd.leases; udhcpd /etc/udhcpd.conf && echo "S90wifi: udhcpd 192.168.50.100-200"; }
+		else
+			echo "S90wifi: hostapd failed to start"
 		fi
 	fi
-	;;
-stop)
-	killall udhcpd 2>/dev/null
-	killall hostapd 2>/dev/null
+}
+stop() {
+	killall wpa_supplicant udhcpc hostapd udhcpd 2>/dev/null
+	# wait for them to actually exit: a restart that races the old
+	# wpa_supplicant leaves its control socket behind, the new instance
+	# fails to start, and the old one survives with the wrong network.
+	local i=0
+	while [ $i -lt 30 ] && pgrep -x wpa_supplicant >/dev/null 2>&1; do sleep 0.1; i=$((i+1)); done
+	i=0
+	while [ $i -lt 30 ] && pgrep -x hostapd >/dev/null 2>&1; do sleep 0.1; i=$((i+1)); done
+	killall -9 wpa_supplicant hostapd 2>/dev/null
+	rm -rf /var/run/wpa_supplicant /var/run/hostapd
+	ip addr flush dev wlan0 2>/dev/null
 	ip link set wlan0 down 2>/dev/null
-	;;
-*)
-	echo "usage: $0 start|stop"
-	;;
+}
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart) stop; sleep 1; start ;;
+	*) echo "usage: $0 start|stop|restart" ;;
 esac

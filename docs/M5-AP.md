@@ -992,6 +992,51 @@ D-cache over 4 KiB pages. Instruction/data cache coherence on page reuse is the
 leading suspect; a power cycle clears it. Separate work item.
 
 
+## Update: station mode -- the board joins a WPA2 network
+
+Client mode shipped in v1.0 with `wpa_supplicant`, but the radio never
+associated: `wpa_supplicant` logged the auth request as sent, then
+`SME: Authentication timeout`. Instrumenting `rtl_op_tx` / `rtl_pci_tx` /
+`rtl92ee_set_desc` and capturing the air on the target channel with a second
+radio found two independent faults, both invisible because `rtl_dbg()` is
+compiled out in this build:
+
+1. **Inactive power-save (IPS)**, on by default in `rtl8192ee`, turns the RF
+   off whenever a station is unlinked and not scanning. `rtl_op_tx` then drops
+   every management frame (`rfpwr_state != ERFON`). On air: nothing from the
+   board, not even probe requests. AP mode never engages IPS, which is why the
+   AP work never saw it. Fix: `.inactiveps = false`.
+
+2. With IPS off the station authenticated and associated once -- and then the
+   management queue was dead for the rest of the boot. The `REG_MGQ_TXBD_IDX`
+   snapshot at every kick showed the hardware **read pointer frozen at the
+   write pointer's value of one instant** (`reg=017101d4..d6`, no `MGNTDOK`)
+   while later auth frames kept being kicked into the ring (queue depth 131).
+   The freeze coincides with `_rtl92ee_download_rsvd_page()`, run once at
+   association, which "resets the TX BD pointer" by writing BIT(4) of
+   `REG_MGQ_TXBD_NUM + 3` -- a byte that is really the high half of
+   `REG_RX_RXBD_NUM`. Skipping that write keeps rp tracking wp through the
+   join (`reg=00520052` afterwards) and the 4-way handshake completes.
+
+Result on the bench against a real WPA2 network (BRAVO, channel 11, -18 dBm):
+`wpa_state=COMPLETED`, `pairwise_cipher=CCMP`, EAPOL 1/4..4/4 on air in the
+correct alternation, DHCP lease from the network's router
+(`192.168.100.221`). Both fixes are `patches/rtlwifi-zzzsta-station-mode.patch`.
+
+One more rootfs fix fell out of the traffic test: `udhcpc` obtained the lease
+but configured nothing, because the upstream rootfs ships no
+`/usr/share/udhcpc/default.script` (there is no `/usr/share` at all). Client
+mode now runs `udhcpc -s /etc/udhcpc.script`, which applies the address,
+default route and DNS; with that, ping to the network's gateway and to the
+internet both pass.
+
+Left open: the reserved-page download is never confirmed by the firmware
+(`bcnvalid` stays 0; reported once with `pr_warn_once`) -- the link works
+without it. The `/userdata` jffs2 overlay does not reliably mount, so client
+configs persist only when it does; `/tmp/wpa_supplicant.conf` is the
+dependable per-boot override. The MAC's last byte still changes per boot,
+which cost one capture (the filter was on the previous boot's MAC).
+
 ## Board state (current)
 
 Kernel: storm quiesce (`zzfix`), IRQ-line mask while driver-disabled (`zzfix4`),

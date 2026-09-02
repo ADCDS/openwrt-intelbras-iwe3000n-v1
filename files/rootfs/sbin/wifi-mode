@@ -1,0 +1,25 @@
+#!/bin/sh
+# wifi-mode -- show or change the Wi-Fi role, then restart it.
+#   wifi-mode              print the current mode
+#   wifi-mode ap           serve the IWE3000N-test access point
+#   wifi-mode client       join the network in /etc/wpa_supplicant.conf
+#   wifi-mode toggle       switch between the two
+#
+# The live mode is /tmp/wifi.mode (RAM). A change is also written to
+# /userdata/wifi.mode when that is writable, so it survives a reboot; if it is
+# not, the mode falls back to the built-in default (/etc/wifi-mode) next boot.
+RUN=/tmp/wifi.mode
+cur() { cat "$RUN" 2>/dev/null || cat /userdata/wifi.mode 2>/dev/null || cat /etc/wifi-mode 2>/dev/null || echo ap; }
+case "${1:-}" in
+	"" ) cur; exit 0 ;;
+	ap|client) NEW="$1" ;;
+	toggle) [ "$(cur)" = client ] && NEW=ap || NEW=client ;;
+	*) echo "usage: $0 [ap|client|toggle]"; exit 1 ;;
+esac
+echo "$NEW" > "$RUN"
+# best-effort persistence (only if /userdata is a writable mount)
+if mkdir -p /userdata 2>/dev/null && touch /userdata/.w 2>/dev/null; then
+	rm -f /userdata/.w; echo "$NEW" > /userdata/wifi.mode 2>/dev/null
+fi
+echo "wifi-mode -> $NEW"
+/etc/init.d/S90wifi restart

@@ -57,8 +57,10 @@ chosen and the name stays for findability. Read it as "replacement firmware".
 | ethernet | `rtl8196e-eth`, 100 Mbit jack; iperf3 **73 Mbit/s out, 91 Mbit/s in** ([M2](docs/M2-ETHERNET.md)) |
 | PCIe | from-scratch host driver `pci-rtl819x.c`; the RTL8192EE enumerates as `10ec:818b` ([M3](docs/M3-PCIE.md), [M4](docs/M4-RADIO.md)) |
 | Wi-Fi | mainline `rtl8192ee` + hostapd 2.11, WPA2-PSK AP up at boot; a client authenticates, associates, completes the 4-way handshake and pings 20/20 ([M5](docs/M5-AP.md)) |
-| flash | kernel ~1.8 MB in a 1984 KiB partition, rootfs ~925 KiB in 1600 KiB, 448 KiB jffs2 overlay ([M6](docs/M6-FLASH-BUDGET.md)) |
+| flash | kernel 1812 KiB of 1984 (91 %), rootfs 1355 KiB of 1600 (85 %; wpa_supplicant is the big addition), 448 KiB jffs2 overlay ([M6](docs/M6-FLASH-BUDGET.md)) |
 | services | **DHCP server** on the AP (`192.168.50.100`–`.200`), **SSH** (dropbear, root login) |
+| client mode | `wifi-mode client` joins a WPA2 network as a station: authenticates, associates, completes the 4-way handshake, gets a DHCP lease ([how](docs/INSTALL.md#client-mode)). Two rtlwifi fixes made this possible (`patches/rtlwifi-zzzsta-station-mode.patch`) |
+| button | the WPS button is live and programmable: short press runs `/etc/button/short`, long press `/etc/button/long` (default: toggle AP ↔ client); red/blue LEDs via `led` |
 | memory | ~11 MiB free with the AP up and a client attached |
 
 **Known issues, in the order they will bite you:**
@@ -84,6 +86,12 @@ chosen and the name stays for findability. Read it as "replacement firmware".
   wireless stack overran its window by 28 bytes.
 - The second interrupt fix (`zzfix4`) was triggered by a phone joining and
   validated with the bench adapter; the phone re-test is pending.
+- **Client mode caveats.** The radio is a single 2.4 GHz PHY: it is an AP *or*
+  a station, not both (no repeater). The `/userdata` jffs2 overlay does not
+  reliably mount on this board, so a persistent client config may not survive;
+  `/tmp/wpa_supplicant.conf` (this boot) always works. The firmware never
+  confirms the reserved-page download at association (`pr_warn_once`); the
+  link works regardless.
 
 ## The hardware
 

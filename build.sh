@@ -156,6 +156,10 @@ PY
     install -Dm644 "$HERE/patches/rtlwifi-zzfix4-mask-irq-while-driver-disabled.patch" \
                    "$KDIR/patches-6.18/rtlwifi-zzfix4-mask-irq-while-driver-disabled.patch"
 
+    echo "==> rtlwifi: station mode -- IPS off, no MGQ pointer reset at association (see the patch header)"
+    install -Dm644 "$HERE/patches/rtlwifi-zzzsta-station-mode.patch" \
+                   "$KDIR/patches-6.18/rtlwifi-zzzsta-station-mode.patch"
+
     echo "==> mac80211 RX tasklet budget (softirq livelock fix)"
     install -Dm644 "$HERE/patches/mac80211-bound-rx-tasklet.patch" \
                    "$KDIR/patches-6.18/mac80211-bound-rx-tasklet.patch"
@@ -299,6 +303,12 @@ want = {
     # Wireless. Built in, not modules: upstream has CONFIG_MODULES unset and
     # their build has no modules_install, so =m would silently produce nothing.
     # The firmware blob is loaded from /lib/firmware in the rootfs.
+    # The WPS button and the two panel LEDs are driven from userspace over the
+    # classic /sys/class/gpio interface (led, S60button). In 6.18 that lives
+    # behind GPIO_SYSFS_LEGACY; without it /sys/class/gpio is empty and export
+    # fails. GPIO 4 = WPS button, 13 = red LED, 14 = blue LED (from stock).
+    "CONFIG_GPIO_SYSFS": "CONFIG_GPIO_SYSFS=y",
+    "CONFIG_GPIO_SYSFS_LEGACY": "CONFIG_GPIO_SYSFS_LEGACY=y",
     "CONFIG_WIRELESS": "CONFIG_WIRELESS=y",
     "CONFIG_CFG80211": "CONFIG_CFG80211=y",
     "CONFIG_MAC80211": "CONFIG_MAC80211=y",
@@ -403,11 +413,17 @@ cmd_rootfs() {
     # /userdata/usr/sbin -- the partition this board does not have -- and
     # install -D refuses to create a directory over a symlink, so the
     # binaries silently never arrived while the .conf did.
-    for u in sbin/hostapd sbin/hostapd_cli etc/hostapd.conf; do
+    # AP (hostapd) + client (wpa_supplicant), the LED/mode helpers, and the
+    # button handlers. wpa_supplicant/wpa_cli come from tools/build-hostapd.sh.
+    for u in sbin/hostapd sbin/hostapd_cli sbin/wpa_supplicant sbin/wpa_cli \
+             sbin/led sbin/wifi-mode etc/button/short etc/button/long etc/udhcpc.script; do
         [ -f "$HERE/files/rootfs/$u" ] && \
             install -Dm755 "$HERE/files/rootfs/$u" "$sk/$u" && echo "    $u"
     done
-    [ -f "$sk/etc/hostapd.conf" ] && chmod 644 "$sk/etc/hostapd.conf"
+    for u in etc/hostapd.conf etc/wpa_supplicant.conf etc/wifi-mode; do
+        [ -f "$HERE/files/rootfs/$u" ] && \
+            install -Dm644 "$HERE/files/rootfs/$u" "$sk/$u" && echo "    $u"
+    done
 
     echo "==> AP at boot"
     # Upstream's rcS only runs /userdata/etc/init.d/S??*, and /userdata is the
@@ -422,6 +438,7 @@ cmd_rootfs() {
     install -Dm600 "$HERE/files/rootfs/etc/dropbear/dropbear_ed25519_host_key" \
                    "$sk/etc/dropbear/dropbear_ed25519_host_key"
     install -Dm755 "$HERE/files/rootfs/etc/init.d/S90wifi" "$sk/etc/init.d/S90wifi"
+    install -Dm755 "$HERE/files/rootfs/etc/init.d/S60button" "$sk/etc/init.d/S60button"
     install -Dm644 "$HERE/files/rootfs/etc/udhcpd.conf" "$sk/etc/udhcpd.conf"
     local rcs="$sk/etc/init.d/rcS"
     if grep -q "iwe3000n: rootfs init scripts" "$rcs"; then

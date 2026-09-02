@@ -19,8 +19,8 @@ mtd3: 00070000 00010000 "rootfs_data"
 | partition | range | size | image | used |
 |---|---|---|---|---|
 | `boot` | `0x000000`–`0x010000` | 64 KiB | — | never written |
-| `kernel` | `0x010000`–`0x200000` | 1984 KiB | 1784 KiB | **90 %** |
-| `rootfs` | `0x200000`–`0x390000` | 1600 KiB | 923 KiB | 58 % |
+| `kernel` | `0x010000`–`0x200000` | 1984 KiB | 1812 KiB (v1.0) | **91 %** |
+| `rootfs` | `0x200000`–`0x390000` | 1600 KiB | 1355 KiB (v1.0) | 85 % |
 | `rootfs_data` | `0x390000`–`0x400000` | 448 KiB | — | 44 % in use |
 
 `0x10000 + 0x1f0000 + 0x190000 + 0x70000 = 0x400000` — **exactly 4 MiB, no
@@ -55,5 +55,7 @@ So the practical kernel ceiling on this board is the loader's, not the partition
 table's, and it is roughly 100 KiB above where the current image sits. Anything
 substantial added to the kernel from here needs something else removed.
 
-The rootfs has 677 KiB free and is the place to put anything that can live in
-userspace.
+The rootfs had 677 KiB free at M6; v1.0 spent most of it on `wpa_supplicant`
+(client mode, ~430 KiB compressed), `udhcpd`, the button/LED scripts and the
+SSH host key -- 245 KiB remain. The kernel grew 4 KiB (GPIO sysfs for the
+button) to 1812 KiB, which the loader still writes.

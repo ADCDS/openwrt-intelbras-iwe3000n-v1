@@ -1,0 +1,6 @@
+#!/bin/sh
+# Short press of the WPS button. Default: blink the blue LED three times so you
+# can confirm the button works. Replace this (or /userdata/button/short) with
+# whatever you want.
+i=0
+while [ $i -lt 3 ]; do led blue off; sleep 1; led blue on; sleep 1; i=$((i+1)); done

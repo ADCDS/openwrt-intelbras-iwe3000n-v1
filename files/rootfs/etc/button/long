@@ -1,0 +1,7 @@
+#!/bin/sh
+# Long press (>= 3 s) of the WPS button. Default: toggle between AP and client
+# mode. Replace this (or /userdata/button/long) with your own action.
+logger -t button "long press: toggling wifi mode" 2>/dev/null
+# flash both LEDs to acknowledge, then switch
+led red on; led blue on; sleep 1
+exec wifi-mode toggle
