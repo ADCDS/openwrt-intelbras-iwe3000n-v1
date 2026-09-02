@@ -464,6 +464,7 @@ cmd_rootfs() {
     # partition this board does not have. Teach it to run the rootfs's own
     # /etc/init.d/S??* as well (idempotent: marker comment), and ship the AP
     # start script there.
+    install -Dm755 "$HERE/files/rootfs/etc/init.d/S40mac" "$sk/etc/init.d/S40mac"
     install -Dm755 "$HERE/files/rootfs/etc/init.d/S50dropbear" "$sk/etc/init.d/S50dropbear"
     # /etc/dropbear ships as a dangling symlink into /userdata (absent here);
     # replace it with a real directory carrying the shipped host key, so SSH

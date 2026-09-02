@@ -1,0 +1,46 @@
+#!/bin/sh
+# S40mac -- give eth0 this unit's real MAC address.
+#
+# The ethernet driver finds no MAC in the device tree (CONFIG_NVMEM is off, so
+# the nvmem-cell route of_get_mac_address() would use is compiled out) and
+# falls back to eth_hw_addr_random(): a different address every boot, which
+# breaks DHCP reservations and anything MAC-pinned.
+#
+# The board's real MAC lives in the H601 factory block in mtd0 at 0x6000: a
+# 4-byte "H601" tag, then two copies of the address starting at 0x600d. mtd0 is
+# never written by this port, so this is read-only and safe. Each unit reads
+# its own address -- nothing is baked into the image.
+#
+# Runs before the network scripts. eth0 is left in whatever state it was in;
+# the address can only be changed while the interface is down.
+MTD=/dev/mtd0
+OFF=24589          # 0x600d
+IFACE=eth0
+
+[ -e "/sys/class/net/$IFACE" ] || exit 0
+[ -r "$MTD" ] || { echo "S40mac: no $MTD"; exit 0; }
+
+mac=$(dd if="$MTD" bs=1 skip="$OFF" count=6 2>/dev/null \
+      | hexdump -e '6/1 "%02x:"' | sed 's/:$//')
+
+case "$mac" in
+	00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|"")
+		echo "S40mac: no usable MAC in the factory block ($mac)"; exit 0 ;;
+esac
+# reject a multicast address (low bit of the first octet set): the factory
+# block would have to be damaged, and the kernel would refuse it anyway
+first=$(echo "$mac" | cut -d: -f1)
+if [ $(( 0x$first & 1 )) -ne 0 ]; then
+	echo "S40mac: factory MAC $mac is multicast, ignoring"; exit 0
+fi
+
+was_up=0
+[ "$(cat /sys/class/net/$IFACE/operstate 2>/dev/null)" != down ] && was_up=1
+ip link set "$IFACE" down 2>/dev/null
+if ip link set "$IFACE" address "$mac" 2>/dev/null; then
+	echo "S40mac: $IFACE -> $mac (factory)"
+else
+	echo "S40mac: could not set $IFACE to $mac"
+fi
+[ "$was_up" = 1 ] && ip link set "$IFACE" up 2>/dev/null
+exit 0

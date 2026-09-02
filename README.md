@@ -70,9 +70,11 @@ chosen and the name stays for findability. Read it as "replacement firmware".
   this frequent and is fixed; the residual smells like I/D-cache coherence on
   the Lexra core (`c-lexra.c` never invalidates the I-cache on an exec-page
   remap) and is the top open item.
-- **MACs are not the board's.** `eth0` gets a random MAC every boot; `wlan0`
-  uses the radio chip's efuse MAC, whose last byte varies per boot. The real
-  MAC is in `mtd0`'s factory block and nothing reads it yet (`nvmem-cell` work).
+- **`wlan0`'s MAC still varies per boot.** It comes from the radio chip's efuse
+  and its last byte changes on each read. (`eth0` is fixed: `S40mac` reads this
+  unit's real address from the H601 factory block in `mtd0` at `0x600d` and
+  applies it at boot. The device-tree route would be cleaner but needs
+  `CONFIG_NVMEM`, which is off, and the kernel partition is at 91 %.)
 - **~23 % loss at 1 packet/s** while bursts pass clean — a power-save
   interaction, not RF. Unresolved.
 - **Debug instrumentation is compiled in** (`patches/DEBUG-*`, `*-zdebug-*`:
