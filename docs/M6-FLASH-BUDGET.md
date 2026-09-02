@@ -36,7 +36,9 @@ The kernel carries the whole wireless stack built in — cfg80211, mac80211,
 rtlwifi, rtl8192ee — plus `rtl8192eefw.bin` and `regulatory.db` linked via
 `CONFIG_EXTRA_FIRMWARE`, because a built-in driver probes before the rootfs
 mounts and cannot load a blob from it. That took the image from 1408 KiB (M1) to
-1784 KiB.
+1784 KiB, and later work (station mode, GPIO sysfs for the button, IP multicast
+for mDNS, minus upstream's `DMA_API_DEBUG` and `PAGE_POISONING`) to the 1812 KiB
+v1.0 ships.
 
 Paying for it: IPv6, `RTLWIFI_DEBUG`, `MAC80211_MESH` and the cfg80211/mac80211
 debugfs entries are off. That is what brought a 1896 KiB image down to 1764, and
@@ -48,8 +50,9 @@ the firmware then added 20 KiB.
 refuses to write a kernel image somewhere between 1808 and 1896 KiB.** It
 accepts the image over TFTP, prints `checksum Ok !` and the burn address, then
 scans `no sys signature at 000NN000!` 48 times and gives up *without writing and
-without an error*. 1764 KiB writes, and so does the 1808 KiB v1.0 kernel;
-1896 KiB does not. The exact threshold was not bisected.
+without an error*. 1764 KiB writes, and so do the 1808, 1812 and 1816 KiB
+kernels built during this work (v1.0 ships 1812); 1896 KiB does not. The exact
+threshold was not bisected.
 
 So the practical kernel ceiling on this board is the loader's, not the partition
 table's, and it is roughly 100 KiB above where the current image sits. Anything

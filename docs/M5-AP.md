@@ -40,7 +40,9 @@ the earliest version of this file, the RF front end.
 
 **Still open:** ~10 % of cold boots fault in rcS (I/D-cache coherence
 suspected); the wlan MAC's last byte varies per boot; ~23 % loss at 1 pkt/s
-(power-save shaped); no DHCP server; and the phone re-test of fix 6.
+(power-save shaped); and the phone re-test of fix 6. (A DHCP server, client
+mode, the WPS button and mDNS all landed later — see the updates below and the
+board state at the end.)
 
 ---
 
@@ -1040,14 +1042,19 @@ which cost one capture (the filter was on the previous boot's MAC).
 ## Board state (current)
 
 Kernel: storm quiesce (`zzfix`), IRQ-line mask while driver-disabled (`zzfix4`),
-RX refill fix, RX ring 64, plus the issue #99 debug instrumentation (all
-default-silent). `build.sh` now removes its own stale patches from upstream's
-`patches-6.18/` before installing, so a fresh clone builds what the recipe
-says. hostapd `ENABLED`; a real client associates, authorizes and passes
-traffic; MemFree ~10.6 MiB with a client up. Kernel at `0x00010000`, rootfs and
-`mtd0` untouched, loader TFTP recovery as before. No DHCP server on the board
-(busybox has `udhcpc` only) — clients need a static address in
-`192.168.50.0/24`, AP is `.1`.
+RX refill fix, RX ring 64, the two station-mode fixes
+(`rtlwifi-zzzsta-station-mode`: IPS off, no MGQ pointer reset at association),
+GPIO sysfs for the button and IP multicast for mDNS, plus the issue #99 debug
+instrumentation (all default-silent). Upstream's `DMA_API_DEBUG` and
+`PAGE_POISONING` are off. `build.sh` removes its own stale patches from
+upstream's `patches-6.18/` before installing, so a fresh clone builds what the
+recipe says.
+
+Userspace: hostapd `ENABLED` with a `udhcpd` DHCP server (`192.168.50.100`–
+`.200`), dropbear SSH, `wpa_supplicant` for client mode, the WPS button
+(`S60button`) and the mDNS responder (`S95mdns`). A real client associates,
+authorizes and passes traffic; MemFree ~10.6 MiB with a client up. Kernel at
+`0x00010000`, rootfs and `mtd0` untouched, loader TFTP recovery as before.
 
 ## What to do next
 
@@ -1057,8 +1064,11 @@ traffic; MemFree ~10.6 MiB with a client up. Kernel at `0x00010000`, rootfs and
 - Boot flakiness (~10% of cold boots fault in rcS): test the I-cache
   invalidation on exec-page remap and the D-cache alias flags in `c-lexra.c`,
   measured as boot-fault rate over many boots.
-- Add a DHCP server to the rootfs (busybox `udhcpd`) so ordinary clients get an
-  address.
+- **Multicast over the AP.** Group-addressed frames do not cross the AP path in
+  either direction (found via mDNS: the responder never sees a client's query,
+  its announcements never arrive), while unicast and DHCP are fine. Suspect the
+  hardware multicast address filter and the DTIM-buffered group path in
+  `rtl8192ee`. Fixing it is what would make `iwe3000n.local` work in AP mode.
 - Soak; the wifi MAC's random last byte (efuse read); 23% loss at 1 pkt/s
   (power-save shaped); then strip the issue #99 instrumentation and shape the
   quiesce/mask fix as a hal op for upstream.

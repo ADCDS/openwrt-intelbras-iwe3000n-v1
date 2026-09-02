@@ -231,8 +231,10 @@
 	#size-cells = <0>;
 
 	/*
-	 * TODO: lan-led-gpios. Upstream's Lidl board uses gpio0 14 (B6 /
-	 * LED_PORT4); untraced here.
+	 * No lan-led-gpios here. Upstream's Lidl board drives a LAN LED from
+	 * gpio0 14, but on this board line 14 is the blue panel LED (read from
+	 * the stock firmware) and userspace owns it -- see &gpio0 below. Which
+	 * line, if any, reflects link state here was never traced.
 	 *
 	 * The stock firmware brings up eth0 on vid 9 (member port 0x10f) and
 	 * eth1 on vid 8 (member port 0x110), with peth0 mapped to eth1 and the

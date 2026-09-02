@@ -15,8 +15,10 @@ WARNING: /userdata/etc/init.d not found
 ===== System ready =====
 ```
 
-`build.sh rootfs` replaces the two symlinks that login actually needs with real
-files inside the squashfs. Content is copied verbatim from upstream's
+`build.sh rootfs` replaces the symlinks the image actually needs with real
+files inside the squashfs: `passwd` and `group` (login), `hostname` (so the box
+is `iwe3000n`, and `iwe3000n.local` over mDNS) and the `dropbear` directory
+(which carries the shipped SSH host key — see `etc/dropbear/README.md`). Content is copied verbatim from upstream's
 `34-Userdata/skeleton/etc/`, so the credential is **the upstream default,
 `root` / `root`** — not something invented here.
 
@@ -28,7 +30,12 @@ Change both before this is anywhere real. Changing the password means writing
 copy is what `login` reads, so the symlink would have to come back for a
 per-device password to take effect.
 
-The other dangling symlinks (`TZ`, `hostname`, `motd`, `version`, `ntp.conf`,
-`eth0.conf`, `dropbear`, …) are left alone deliberately: nothing so far needs
-them, and each one replaced is a decision about where this board's state lives
-that is better made when something actually reads it.
+The other dangling symlinks (`TZ`, `motd`, `version`, `ntp.conf`, `eth0.conf`,
+…) are left alone deliberately: nothing so far needs them, and each one
+replaced is a decision about where this board's state lives that is better made
+when something actually reads it.
+
+This directory also carries what the image runs beyond upstream's skeleton:
+`sbin/` (hostapd, wpa_supplicant, the `led`/`wifi-mode` helpers, the mDNS
+responder), `etc/init.d/` (`S50dropbear`, `S60button`, `S90wifi`, `S95mdns`),
+the button handlers in `etc/button/`, and the AP/client/DHCP configs.

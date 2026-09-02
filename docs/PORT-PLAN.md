@@ -5,6 +5,9 @@
 > `0x200000`–`0x390000` (1600 KiB), because the kernel grew to ~1.8 MB once the
 > wireless stack and its firmware were built in ([`M6-FLASH-BUDGET.md`](M6-FLASH-BUDGET.md)).
 > The "no Wi-Fi" cost below did not materialise — see [`WIFI-PLAN.md`](WIFI-PLAN.md).
+> The LED and button GPIOs listed below as untraced were later read straight out
+> of the stock firmware's `/sys/kernel/debug/gpio`: button 4, red LED 13, blue
+> LED 14. They are wired up and used by the shipped image.
 > The load address question resolved itself: the loader stages the image where
 > the `cvimg` header says and jumps there.
 

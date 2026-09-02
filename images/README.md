@@ -30,7 +30,8 @@ Recovery: [`../docs/RECOVERY.md`](../docs/RECOVERY.md).
 server** (`.100`–`.200`), **SSH** (dropbear, root login), **client mode**
 (`wifi-mode client` joins a WPA2 network -- verified to the DHCP lease), a
 **programmable WPS button** with LED feedback, and **mDNS**: the box is
-`iwe3000n.local` in either mode. Hardware-gated
+`iwe3000n.local` once it has joined a network (not while serving its own AP --
+see the README). Hardware-gated
 before tagging from a clean flash + cold power cycle: all three services start
 unattended, a WPA2 client gets a DHCP lease, `ssh root@192.168.50.1` logs in,
 ping clean.

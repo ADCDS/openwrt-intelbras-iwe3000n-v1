@@ -56,7 +56,7 @@ chosen and the name stays for findability. Read it as "replacement firmware".
 | boot | Linux 6.18.45 to a login prompt ~5 s after power-on |
 | ethernet | `rtl8196e-eth`, 100 Mbit jack; iperf3 **73 Mbit/s out, 91 Mbit/s in** ([M2](docs/M2-ETHERNET.md)) |
 | PCIe | from-scratch host driver `pci-rtl819x.c`; the RTL8192EE enumerates as `10ec:818b` ([M3](docs/M3-PCIE.md), [M4](docs/M4-RADIO.md)) |
-| Wi-Fi | mainline `rtl8192ee` + hostapd 2.11, WPA2-PSK AP up at boot; a client authenticates, associates, completes the 4-way handshake and pings 20/20 ([M5](docs/M5-AP.md)) |
+| Wi-Fi | mainline `rtl8192ee` + hostapd 2.11; the WPA2-PSK AP is the default role and comes up at boot; a client authenticates, associates, completes the 4-way handshake and pings 20/20 ([M5](docs/M5-AP.md)) |
 | flash | kernel 1812 KiB of 1984 (91 %), rootfs 1362 KiB of 1600 (85 %; wpa_supplicant is the big addition), 448 KiB jffs2 overlay ([M6](docs/M6-FLASH-BUDGET.md)) |
 | services | **DHCP server** on the AP (`192.168.50.100`–`.200`), **SSH** (dropbear, root login), **mDNS**: in client mode the box answers as **`iwe3000n.local`** (`ssh root@iwe3000n.local`) — see the known issue about AP mode |
 | client mode | `wifi-mode client` joins a WPA2 network as a station: authenticates, associates, completes the 4-way handshake, gets a DHCP lease ([how](docs/INSTALL.md#client-mode)). Two rtlwifi fixes made this possible (`patches/rtlwifi-zzzsta-station-mode.patch`) |
@@ -75,8 +75,6 @@ chosen and the name stays for findability. Read it as "replacement firmware".
   MAC is in `mtd0`'s factory block and nothing reads it yet (`nvmem-cell` work).
 - **~23 % loss at 1 packet/s** while bursts pass clean — a power-save
   interaction, not RF. Unresolved.
-- **LEDs and buttons are not wired** (GPIOs untraced; the DTS says `TODO`
-  rather than guessing). The WPS button does nothing.
 - **Debug instrumentation is compiled in** (`patches/DEBUG-*`, `*-zdebug-*`:
   interrupt-controller and radio-ISR counters, `/proc/rtl819x_*`). Silent by
   default; it stays in v1.0 because the radio fixes were validated with it in
