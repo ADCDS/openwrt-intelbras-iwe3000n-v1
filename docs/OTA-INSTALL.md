@@ -35,18 +35,34 @@ The on-flash `mtd1` equals this file with the 20-byte prefix stripped and byte
 writes the `cs6c` image to `mtd1` at `0x10000`.** There is no signing key to
 forge.
 
-## What our image would need
+## The wrapped image, and how it is built
 
-v1.0 ships two loader-TFTP images (`*-kernel.img` at `0x10000`, `*-rootfs.img`
-at `0x200000`). The web updater wants **one** `cs6c` blob laid out like flash:
+`tools/mkota.py` builds it, and the v1.0 release ships the result as
+**`iwe3000n-v1-v1.0-webflash.bin`**. What it does, checked against the exact
+bytes read back from a running unit's flash:
 
-1. Build one payload: `[cs6c header, burn=0x00010000][loader+kernel][pad to
-   0x200000-0x10000][squashfs][deadc0de]`, with the `cs6c` length field set to
-   the payload length.
-2. Prepend the 4 tag bytes `b3 00 aa 06`.
-3. Prepend `MD5(tag || cs6c-image || deadc0de)` as the first 16 bytes.
+```
+mkota.py kernel.img rootfs.img -o webflash.bin --tag-from <vendor.bin>
+```
 
-Then upload it through the stock web UI's firmware page.
+The bytes the updater writes to flash (`0x10000` onward) must equal the layout
+this port boots from, so the wrapper is not a repackage of the two loader
+images -- it reproduces the flash:
+
+- **flash `0x10000` = `kernel.img` verbatim.** The kernel keeps its `cs6c`
+  header; the loader boots through it. So the wrapped payload begins with the
+  whole `*-kernel.img`.
+- **flash `0x200000` = raw squashfs (`hsqs`).** The rootfs `r6cr` header is
+  *not* on flash -- the kernel mounts `/dev/mtdblock2` as squashfs, so `hsqs`
+  must sit at `0x200000`. So the wrapper strips the 16-byte `r6cr` header (and
+  the trailing 2-byte cvimg checksum) from `*-rootfs.img` and pads the kernel
+  out to `0x1F0000` so the squashfs lands exactly at `0x200000`.
+
+It is then wrapped in the vendor container: `[MD5(16)][tag b3 00 aa 06][kernel
++ pad + squashfs][deadc0de]`, `MD5 = md5(everything after the first 16 bytes)`.
+The updater strips the 20-byte prefix and writes the rest verbatim.
+
+Upload `webflash.bin` through the stock web UI's firmware page.
 
 ## Before trusting it
 
