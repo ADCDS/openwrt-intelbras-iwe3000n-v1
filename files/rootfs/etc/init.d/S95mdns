@@ -1,0 +1,25 @@
+#!/bin/sh
+# S95mdns -- announce <hostname>.local over mDNS so the box is reachable as
+# iwe3000n.local without knowing its address (AP mode: 192.168.50.1; client
+# mode: whatever DHCP gave). Runs the tiny static responder /sbin/mdns-announce
+# for wlan0's current IPv4; S90wifi and udhcpc.script call `restart` whenever
+# the address changes.
+NAME=$(cat /etc/hostname 2>/dev/null || echo iwe3000n)
+start() {
+	IP=$(ip -4 -o addr show wlan0 2>/dev/null | sed 's/.*inet //;s/\/.*//' | head -1)
+	[ -n "$IP" ] || { echo "S95mdns: wlan0 has no address yet"; return 0; }
+	[ -x /sbin/mdns-announce ] || { echo "S95mdns: no responder"; return 0; }
+	# the responder joins 224.0.0.251 through the routing table; in AP mode
+	# there is no default route, so give multicast an explicit way out.
+	ip route add 224.0.0.0/4 dev wlan0 2>/dev/null
+	killall mdns-announce 2>/dev/null   # one responder only (S90wifi and rcS both start us)
+	/sbin/mdns-announce "$NAME" "$IP" -v >/tmp/mdns.log 2>&1 &
+	echo "S95mdns: $NAME.local -> $IP"
+}
+stop() { killall mdns-announce 2>/dev/null; }
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart) stop; sleep 1; start ;;
+	*) echo "usage: $0 start|stop|restart" ;;
+esac

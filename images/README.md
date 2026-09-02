@@ -16,9 +16,9 @@ that pinned upstream went into them.
 
 | file | bytes | fits | burn address | writes |
 |---|---|---|---|---|
-| `iwe3000n-v1-v1.0-kernel.img` | 1 855 488 | 1812 KiB of 1984 KiB (91 %) | `0x00010000` | the `kernel` partition |
-| `iwe3000n-v1-v1.0-rootfs.img` | 1 388 080 | 1355 KiB of 1600 KiB (85 %) | `0x00200000` | the `rootfs` partition |
-| `iwe3000n-v1-v1.0-webflash.bin` | 3 419 702 | kernel + pad + squashfs, MD5-prefixed | `0x00010000` (inside) | stock's web updater writes it to `linux` |
+| `iwe3000n-v1-v1.0-kernel.img` | 1 859 584 | 1816 KiB of 1984 KiB (91 %) | `0x00010000` | the `kernel` partition |
+| `iwe3000n-v1-v1.0-rootfs.img` | 1 425 760 | 1392 KiB of 1600 KiB (87 %) | `0x00200000` | the `rootfs` partition |
+| `iwe3000n-v1-v1.0-webflash.bin` | 3 457 362 | kernel + pad + squashfs, MD5-prefixed | `0x00010000` (inside) | stock's web updater writes it to `linux` |
 
 Both are `cvimg`-headed for the stock RealTek loader's TFTP; the loader reads
 the burn address from the header and prints it (`burn Addr =0x...!`) before
@@ -28,8 +28,9 @@ Recovery: [`../docs/RECOVERY.md`](../docs/RECOVERY.md).
 **What v1.0 is:** Linux 6.18.45, ethernet, PCIe, mainline `rtl8192ee`, hostapd
 2.11 WPA2 AP `IWE3000N-test` up at boot on `192.168.50.1/24`, a **udhcpd DHCP
 server** (`.100`–`.200`), **SSH** (dropbear, root login), **client mode**
-(`wifi-mode client` joins a WPA2 network -- verified to the DHCP lease), and a
-**programmable WPS button** with LED feedback. Hardware-gated
+(`wifi-mode client` joins a WPA2 network -- verified to the DHCP lease), a
+**programmable WPS button** with LED feedback, and **mDNS**: the box is
+`iwe3000n.local` in either mode. Hardware-gated
 before tagging from a clean flash + cold power cycle: all three services start
 unattended, a WPA2 client gets a DHCP lease, `ssh root@192.168.50.1` logs in,
 ping clean.

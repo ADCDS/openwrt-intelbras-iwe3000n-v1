@@ -103,8 +103,8 @@ What the prompt is known to do, from trying it:
   needs a few seconds after link-up.
 - It **silently refuses kernels above a size somewhere between 1808 and
   1896 KiB**: `checksum Ok !`, the burn address, then a scan of
-  `no sys signature at ...` and no write. Kernels of 1808 and 1812 KiB (v1.0)
-  write fine.
+  `no sys signature at ...` and no write. Kernels of 1808, 1812 and 1816 KiB
+  (v1.0) write fine.
 
 ⚠ Never type at the loader prompt at the wrong baud rate. It is a command
 interpreter with flash-write commands; garbage bytes are still bytes. The

@@ -41,6 +41,7 @@ start() {
 		if hostapd -B /etc/hostapd.conf; then
 			echo "S90wifi: AP mode, $(sed -n 's/^ssid=//p' /etc/hostapd.conf) on 192.168.50.1"
 			[ -f /etc/udhcpd.conf ] && { : > /tmp/udhcpd.leases; udhcpd /etc/udhcpd.conf && echo "S90wifi: udhcpd 192.168.50.100-200"; }
+			[ -x /etc/init.d/S95mdns ] && /etc/init.d/S95mdns restart >/dev/null 2>&1
 		else
 			echo "S90wifi: hostapd failed to start"
 		fi

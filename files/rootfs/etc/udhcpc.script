@@ -20,6 +20,7 @@ case "$1" in
 			[ -L /etc/resolv.conf ] || cp "$RESOLV" /etc/resolv.conf 2>/dev/null
 		fi
 		echo "udhcpc: $interface $ip/$mask via ${router:-none}"
+		[ -x /etc/init.d/S95mdns ] && /etc/init.d/S95mdns restart >/dev/null 2>&1
 		;;
 	nak)
 		echo "udhcpc: NAK from ${serverid:-?}"

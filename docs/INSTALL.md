@@ -88,6 +88,8 @@ fixed one shipped in the image (shared across all units — a bench key, see
 
 ```sh
 ssh root@192.168.50.1                             # password: root
+# (iwe3000n.local resolves once the box has joined a network -- client mode;
+#  it does not answer while it is serving its own AP, see the README)
 hostapd_cli -i wlan0 status | grep ^state        # state=ENABLED
 hostapd_cli -i wlan0 all_sta                      # your client, flags=[AUTH][ASSOC][AUTHORIZED]...
 cat /tmp/udhcpd.leases | wc -l                    # a lease per client
@@ -119,6 +121,7 @@ EOF
 wifi-mode client        # stops the AP, joins, gets an address by DHCP
 wpa_cli -i wlan0 status | grep -E "wpa_state|^bssid|^freq"   # wpa_state=COMPLETED
 ip -4 addr show wlan0
+# from another machine on that network: ping iwe3000n.local
 wifi-mode ap            # back to serving IWE3000N-test
 ```
 

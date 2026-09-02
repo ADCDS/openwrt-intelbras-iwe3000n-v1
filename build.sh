@@ -13,6 +13,7 @@
 #   ./build.sh kernel   overlay, then build the kernel in docker
 #   ./build.sh rootfs   fix the /etc symlinks, add the AP, then build the squashfs
 #   ./build.sh release  kernel + rootfs, then copy both to out/ with checksums
+#   PROFILE=dir ./build.sh rootfs|release   layer a private dir/rootfs/ over the image last
 #   ./build.sh shell    a shell in the builder container
 #
 # Nothing here writes to the device. Flashing is a separate, deliberate step —
@@ -307,6 +308,18 @@ want = {
     # classic /sys/class/gpio interface (led, S60button). In 6.18 that lives
     # behind GPIO_SYSFS_LEGACY; without it /sys/class/gpio is empty and export
     # fails. GPIO 4 = WPS button, 13 = red LED, 14 = blue LED (from stock).
+    # mDNS (iwe3000n.local) needs the box to RECEIVE multicast: without
+    # IP_MULTICAST the kernel has no IGMP, IP_ADD_MEMBERSHIP is a no-op and
+    # the responder never hears a query (announcements still go out, which is
+    # why the name resolved from a cache in client mode but never in AP mode).
+    "CONFIG_IP_MULTICAST": "CONFIG_IP_MULTICAST=y",
+    # Upstream's fragment ships these debug options on. DMA_API_DEBUG keeps a
+    # hash table of every mapping and fired a check_unmap WARNING from the
+    # ethernet path on this board; PAGE_POISONING rewrites every freed page.
+    # Both cost size and speed on a 32 MB box and belong in a debug build, not
+    # in a release image.
+    "CONFIG_DMA_API_DEBUG": "# CONFIG_DMA_API_DEBUG is not set",
+    "CONFIG_PAGE_POISONING": "# CONFIG_PAGE_POISONING is not set",
     "CONFIG_GPIO_SYSFS": "CONFIG_GPIO_SYSFS=y",
     "CONFIG_GPIO_SYSFS_LEGACY": "CONFIG_GPIO_SYSFS_LEGACY=y",
     "CONFIG_WIRELESS": "CONFIG_WIRELESS=y",
@@ -377,6 +390,13 @@ cmd_rootfs() {
     need_upstream
     local sk="$UP/3-Main-SoC-Realtek-RTL8196E/33-Rootfs/skeleton"
 
+    # strip a previous PROFILE overlay before anything else (see below)
+    if [ -f "$sk/.profile-files" ]; then
+        echo "==> removing the previous profile overlay from the skeleton"
+        while read -r f; do rm -f "$sk/$f"; done < "$sk/.profile-files"
+        rm -f "$sk/.profile-files"
+    fi
+
     echo "==> replacing dangling /etc symlinks with real files"
     # Upstream points these at /userdata, the 12 MB partition their boards have
     # and this one does not. On a 448 KiB overlay they dangle and login is
@@ -425,6 +445,20 @@ cmd_rootfs() {
             install -Dm644 "$HERE/files/rootfs/$u" "$sk/$u" && echo "    $u"
     done
 
+    # Private profile overlay (the house pattern: dir842-profile, iwe3000n-profile).
+    # PROFILE=/path/to/profile layers $PROFILE/rootfs/ over the skeleton LAST,
+    # so a personal image can carry its own wifi-mode, wpa_supplicant.conf,
+    # button scripts and keys without any of it ever entering this repo.
+    if [ -n "${PROFILE:-}" ]; then
+        [ -d "$PROFILE/rootfs" ] || die "PROFILE=$PROFILE has no rootfs/ directory"
+        echo "==> PROFILE overlay: $PROFILE/rootfs -> skeleton"
+        cp -a "$PROFILE/rootfs/." "$sk/"
+        # remember every file the profile put in, so the next public build
+        # (no PROFILE) can strip them and never ship private material
+        ( cd "$PROFILE/rootfs" && find . -type f | sed 's#^\./##' ) > "$sk/.profile-files"
+        sed 's#^#    #' "$sk/.profile-files"
+    fi
+
     echo "==> AP at boot"
     # Upstream's rcS only runs /userdata/etc/init.d/S??*, and /userdata is the
     # partition this board does not have. Teach it to run the rootfs's own
@@ -439,21 +473,28 @@ cmd_rootfs() {
                    "$sk/etc/dropbear/dropbear_ed25519_host_key"
     install -Dm755 "$HERE/files/rootfs/etc/init.d/S90wifi" "$sk/etc/init.d/S90wifi"
     install -Dm755 "$HERE/files/rootfs/etc/init.d/S60button" "$sk/etc/init.d/S60button"
+    install -Dm755 "$HERE/files/rootfs/etc/init.d/S95mdns" "$sk/etc/init.d/S95mdns"
+    # /etc/hostname is a dangling symlink into /userdata upstream; ship a real
+    # file so the box is iwe3000n (and iwe3000n.local via S95mdns).
+    rm -f "$sk/etc/hostname"; install -Dm644 "$HERE/files/rootfs/etc/hostname" "$sk/etc/hostname"
+    [ -f "$HERE/files/rootfs/sbin/mdns-announce" ] && install -Dm755 "$HERE/files/rootfs/sbin/mdns-announce" "$sk/sbin/mdns-announce" && echo "    sbin/mdns-announce"
     install -Dm644 "$HERE/files/rootfs/etc/udhcpd.conf" "$sk/etc/udhcpd.conf"
+    # The hook is bracketed by marker lines so a changed rcS-hook.sh replaces
+    # the previous copy instead of being skipped as "already applied".
     local rcs="$sk/etc/init.d/rcS"
-    if grep -q "iwe3000n: rootfs init scripts" "$rcs"; then
-        echo "    rcS already runs /etc/init.d/S??*"
-    else
-        python3 - "$rcs" "$HERE/files/rootfs/etc/init.d/rcS-hook.sh" <<'PYH'
-import sys
+    python3 - "$rcs" "$HERE/files/rootfs/etc/init.d/rcS-hook.sh" <<'PYH'
+import sys, re
 p, h = sys.argv[1], sys.argv[2]
-s = open(p).read(); hook = open(h).read()
+s = open(p).read(); hook = open(h).read().rstrip('\n') + '\n'
+begin, end = '# >>> iwe3000n rootfs hook >>>\n', '# <<< iwe3000n rootfs hook <<<\n'
+block = begin + hook + end
+s = re.sub(re.escape(begin) + r'.*?' + re.escape(end), '', s, flags=re.S)   # drop old bracketed copy
+s = re.sub(r'# iwe3000n: rootfs init scripts.*?\ndone\n\n?', '', s, flags=re.S)  # drop the unbracketed first version
 anchor = 'echo "===== System ready ====="'
 assert anchor in s, "rcS anchor not found"
-open(p, "w").write(s.replace(anchor, hook + anchor, 1))
+open(p, "w").write(s.replace(anchor, block + anchor, 1))
+print("    rcS hook (re)applied")
 PYH
-        echo "    rcS now runs /etc/init.d/S??* before 'System ready'"
-    fi
 
     echo "==> busybox: DHCP server applet (udhcpd)"
     # Upstream builds busybox without the DHCP *server*; the AP needs it so
