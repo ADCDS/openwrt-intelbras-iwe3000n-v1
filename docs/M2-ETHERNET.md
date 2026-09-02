@@ -75,7 +75,7 @@ chmod +x /tmp/iperf3
   interrupted, so a script that waits for the shell prompt hangs.
 - **`df` on ramfs reports 0/0/0**, so it looks full when it is not.
 
-## Known gap, deliberately not fixed here
+## Known gap at M2 -- fixed in v1.0
 
 **`eth0` comes up with a random MAC** — `06:df:06:1c:6d:2e` on this boot, and it
 will differ on the next one:
@@ -89,8 +89,15 @@ The board's real MAC, `D8:77:8B:xx:xx:xx`, lives in the H601 factory block at
 this port reads it yet, so every boot presents a new address — DHCP reservations,
 ARP caches and anything MAC-pinned will not survive a reboot.
 
-Fixing it means an `nvmem-cell` on the `boot` partition wired to
-`nvmem-mac-address` in the ethernet node, reading 6 bytes at `0x600d`. That is a
-small, self-contained change and it is **not** done here because M2 is about
-whether the datapath works. It should land before M5, when a real client starts
-associating.
+**Fixed in v1.0, in userspace.** `/etc/init.d/S40mac` reads the six bytes at
+`mtd0 + 0x600d` and applies them to `eth0` before the network scripts run, so
+each unit uses its own address and a DHCP reservation survives a reboot.
+Verified on the bench unit: `d8:77:8b:3f:e2:01` out of its own flash.
+
+The device-tree route is tidier -- an `nvmem-cell` on the `boot` partition
+feeding `of_get_mac_address()`, which this driver already calls -- but it needs
+`CONFIG_NVMEM`, which is off, and the kernel partition is at 91 %. A ~1 KB shell
+script was the cheaper way to the same result. `mtd0` is only ever read.
+
+`wlan0` is a separate matter and still varies per boot: that address comes from
+the radio chip's efuse, not from the H601 block.
