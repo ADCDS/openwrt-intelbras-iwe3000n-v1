@@ -126,6 +126,12 @@ every log in `docs/` was captured and how the loader gets its ESC burst:
 5. Power-cycle. `root`/`root` on console or over `ssh root@192.168.50.1`. The
    AP `IWE3000N-test` is up and hands out DHCP; just join it.
 
+**No serial? There is a verified network install too.** The port can be
+installed over the LAN through stock's own web UI, no case-opening — see
+[`docs/OTA-INSTALL.md`](docs/OTA-INSTALL.md) and the `*-webflash.bin` image on
+the release page. The serial path above is the recovery path and the way back
+to stock.
+
 Prebuilt images and their checksums: [`images/`](images/README.md).
 
 ## Building

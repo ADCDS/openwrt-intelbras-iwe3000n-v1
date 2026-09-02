@@ -1,14 +1,15 @@
-# Installing without opening the case (design note, not yet verified)
+# Installing without opening the case — VERIFIED
 
-The v1.0 install path needs a serial console because the RealTek loader's TFTP
-is the only writer we drive. This note records a **network** path — the stock
-web updater — worked out by reverse-engineering the vendor firmware. **It has
-not been exercised on hardware yet**; the pieces are here so it can be.
+**This works.** The port has been installed over the LAN through stock's own
+web UI, with no serial console and no case-opening, and the device booted
+straight into it. Stock's firmware updater accepts a vendor-shaped image,
+writes it to the `linux` region, and never touches `mtd0`. `tools/mkota.py`
+wraps the two v1.0 images into that container; the release ships the result as
+`iwe3000n-v1-v1.0-webflash.bin`.
 
-The idea is the same one the sibling DIR-842 port uses: stock's own firmware
-updater accepts a vendor-shaped image over the LAN and flashes it with
-`mtd write`, touching only the `linux` region — never `mtd0`. If our image is
-wrapped in the container stock expects, stock installs it for us.
+> ⚠ This still **replaces stock**. Have the serial recovery
+> ([`RECOVERY.md`](RECOVERY.md)) available as a fallback, and a backup of your
+> unit's flash — the web path is proven on the bench unit, not on every unit.
 
 ## The stock update mechanism
 
@@ -64,23 +65,34 @@ The updater strips the 20-byte prefix and writes the rest verbatim.
 
 Upload `webflash.bin` through the stock web UI's firmware page.
 
-## Before trusting it
+## How to do it
 
-- **Prove the container first**: upload the *unmodified* vendor
-  `iwe3000n_0.8.6.bin` back through the web UI and watch (serial, once) whether
-  it calls `sysupgrade`/`mtd write`. That confirms the updater accepts the
-  format before a wrapped port image is risked.
-- **One unknown remains**: `firmware_model.lua` may enforce a model/version
-  string, and the web UI is a custom Lua "Orbit" app, not LuCI. Its bytes could
-  not be read offline: the stock squashfs data blocks use RealTek's
-  Lexra-modified LZMA, which no mainline `xz`/`unsquashfs` decodes — two
-  independent analysis passes recovered every file *name* (1039 inodes) but not
-  the *contents*. Two ways to get the Lua: run `sasquatch` (the vendor-tolerant
-  unsquashfs fork) against `iwe3000n-firmware/mtd2-rootfs.bin`, or read it from
-  a live stock root shell. Settle this before trusting a wrapped image.
-- **Keep the `cs6c` burn field `0x00010000` and the payload within `mtd1`.**
-  The web/sysupgrade path writes only `linux`; that is the property that keeps
-  `mtd0` safe. Reject any image whose burn field is not `0x00010000`.
+1. Put your computer on the stock LAN. Stock's default is `10.0.0.1`; give
+   yourself `10.0.0.2/24` on the wired port (stock also runs DHCP, so an
+   address may come automatically).
+2. Open `http://10.0.0.1/` and go to **Atualizar firmware** (the firmware page,
+   `#!/main/firmware`). Log in if asked — the bench unit's web login was the
+   stock default `admin` / `admin`.
+3. Choose `iwe3000n-v1-v1.0-webflash.bin` and press **Atualizar**. The page
+   shows *"Enviando arquivo. Pode demorar alguns minutos."* while it uploads.
+4. Wait. The device writes flash and reboots itself into the port — the AP
+   `IWE3000N-test` comes up on `192.168.50.1`. Your `10.0.0.x` address stops
+   working because the port is not a `10.0.0.1` repeater; join the Wi-Fi
+   instead.
 
-Until this is done on hardware, [`INSTALL.md`](INSTALL.md) (serial + loader
-TFTP) is the supported path.
+## What the updater actually does (from the verified run)
+
+- The web app reads the file, base64-encodes it in the browser, and **POSTs it
+  in ~100 KB chunks** as JSON to `/cgi-bin/api/v1/system/firmware`:
+  `{"action":"firmware","data":{"current":N,"total":40,"content":"<base64>"}}`,
+  under HTTP Basic auth (`admin:admin` on the bench unit). Each chunk returns
+  `200` with an empty body.
+- After the last chunk the CGI reassembles the image, validates the 16-byte
+  MD5 prefix, strips the 20-byte prefix, writes the rest to the `linux` mtd, and
+  reboots. **No model/version string was enforced** — the container check is the
+  MD5, which `mkota.py` computes. `mtd0` is never written.
+- The wrapped image's `cs6c` burn field is `0x00010000` and the whole payload
+  fits `mtd1`; keep both true for any image built this way.
+
+Serial + loader TFTP ([`INSTALL.md`](INSTALL.md)) remains the recovery path and
+the way to get *back* to stock.
